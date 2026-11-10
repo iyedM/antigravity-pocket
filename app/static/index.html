@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="Antigravity" />
   <meta name="theme-color" content="#0b0f19" />
   <link rel="manifest" href="/manifest.json" />
-  <title>Antigravity Pocket v2.0</title>
+  <title>Antigravity Pocket v2.1</title>
   <style>
     :root[data-theme="dark"] {
       --bg: #0b0f19;
@@ -54,20 +54,28 @@
     .dot { width: 9px; height: 9px; border-radius: 50%; background: #10b981; }
     .dot.offline { background: #ef4444; }
     .controls { display: flex; align-items: center; gap: 6px; }
-    select, .btn {
+    select, .btn, input.text-field {
       background: var(--card);
       color: var(--text);
       border: 1px solid var(--border);
       border-radius: 9px;
       padding: 6px 10px;
       font-size: 12.5px;
-      cursor: pointer;
     }
+    .btn { cursor: pointer; }
     .btn.primary { background: var(--accent); color: #fff; border: none; font-weight: 600; }
     .btn.danger { background: #ef4444; color: #fff; border: none; }
     .btn.success { background: #10b981; color: #fff; border: none; }
     .view { flex: 1; overflow-y: auto; padding: 14px; display: none; flex-direction: column; gap: 12px; }
     .view.active { display: flex; }
+    .kpi-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .kpi-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .kpi-value { font-size: 20px; font-weight: 700; margin-top: 4px; color: var(--accent); }
     .msg {
       max-width: 90%;
       padding: 11px 14px;
@@ -123,19 +131,19 @@
       outline: none;
     }
     nav.tabs {
-      padding: 6px 8px calc(env(safe-area-inset-bottom, 10px) + 6px);
+      padding: 6px 6px calc(env(safe-area-inset-bottom, 10px) + 6px);
       background: var(--panel);
       border-top: 1px solid var(--border);
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 4px;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 3px;
     }
     .tab-btn {
       background: transparent;
       border: none;
       color: var(--muted);
-      font-size: 11.5px;
-      padding: 6px 4px;
+      font-size: 10.5px;
+      padding: 6px 2px;
       border-radius: 8px;
       cursor: pointer;
       font-weight: 600;
@@ -158,67 +166,93 @@
       <span id="header-title">Antigravity Pocket</span>
     </div>
     <div class="controls">
-      <select id="mode-select" onchange="changePermissionMode(this.value)" title="Mode de permission">
+      <select id="mode-select" title="Mode de permission">
         <option value="read_only">🔒 Read-only</option>
         <option value="assisted" selected>🛡️ Assisted</option>
         <option value="autonomous">⚡ Autonomous</option>
       </select>
-      <button class="btn danger" id="cancel-btn" onclick="cancelActiveTurn()" style="display:none">⏹ Stop</button>
-      <button class="btn" onclick="toggleTheme()">🌓</button>
-      <button class="btn" onclick="promptLogin()">🔑</button>
+      <button class="btn danger" id="cancel-btn" style="display:none">⏹ Stop</button>
     </div>
   </header>
 
-  <!-- TAB 1: CHAT & TIMELINE -->
+  <!-- TAB 1: DASHBOARD -->
+  <section id="view-dashboard" class="view">
+    <strong>Tableau de Supervision</strong>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div>Sessions</div><div id="kpi-sessions" class="kpi-value">0</div></div>
+      <div class="kpi-card"><div>Approbations en attente</div><div id="kpi-approvals" class="kpi-value">0</div></div>
+      <div class="kpi-card"><div>Moteur actif</div><div id="kpi-engine" class="kpi-value" style="font-size:14px">-</div></div>
+      <div class="kpi-card"><div>Sécurité Auth</div><div id="kpi-auth" class="kpi-value" style="font-size:14px">-</div></div>
+    </div>
+    <strong>Activité Récente</strong>
+    <div id="dashboard-notifications" style="display:flex;flex-direction:column;gap:8px;"></div>
+  </section>
+
+  <!-- TAB 2: CHAT & AGENT ACTIVITY -->
   <section id="view-chat" class="view active">
     <div id="chat-stream" style="display:flex;flex-direction:column;gap:10px;"></div>
   </section>
 
-  <!-- TAB 2: SESSIONS -->
+  <!-- TAB 3: SESSIONS -->
   <section id="view-sessions" class="view">
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <strong>Sessions & Projets</strong>
-      <button class="btn primary" onclick="createNewSession()">+ Nouvelle Session</button>
+      <button class="btn primary" id="new-session-btn">+ Nouvelle Session</button>
     </div>
     <div id="sessions-list" style="display:flex;flex-direction:column;gap:8px;"></div>
   </section>
 
-  <!-- TAB 3: WORKSPACE FILE MANAGER -->
+  <!-- TAB 4: WORKSPACE -->
   <section id="view-files" class="view">
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <strong>Explorateur Workspace</strong>
       <div>
-        <input type="file" id="upload-input" multiple style="display:none" onchange="uploadFiles(this.files)" />
-        <button class="btn primary" onclick="document.getElementById('upload-input').click()">📎 Envoyer</button>
+        <input type="file" id="upload-input" multiple style="display:none" />
+        <button class="btn primary" id="upload-btn">📎 Envoyer</button>
       </div>
     </div>
     <div id="files-list" style="display:flex;flex-direction:column;gap:8px;"></div>
     <div id="file-preview-box" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <strong id="preview-title">Aperçu</strong>
-        <button class="btn" onclick="document.getElementById('file-preview-box').style.display='none'">Fermer</button>
+        <button class="btn" id="close-preview-btn">Fermer</button>
       </div>
       <pre id="preview-content" class="code-preview"></pre>
     </div>
   </section>
 
-  <!-- TAB 4: APPROVALS -->
+  <!-- TAB 5: APPROVALS -->
   <section id="view-approvals" class="view">
     <strong>Validation des Opérations Sensibles</strong>
     <div id="approvals-list" style="display:flex;flex-direction:column;gap:8px;"></div>
   </section>
 
+  <!-- TAB 6: SETTINGS -->
+  <section id="view-settings" class="view">
+    <strong>Sécurité & Paramètres</strong>
+    <div class="card-box">
+      <input id="password-field" class="text-field" type="password" placeholder="APP_PASSWORD..." style="flex:1" />
+      <button class="btn primary" id="login-btn">Connexion</button>
+      <button class="btn danger" id="logout-btn">Déconnexion</button>
+    </div>
+    <div class="card-box">
+      <span>Apparence (Sombre / Clair)</span>
+      <button class="btn" id="theme-btn">🌓 Basculer</button>
+    </div>
+  </section>
+
   <div class="composer">
-    <button class="btn" onclick="sendQuick('start')">⚡ start</button>
-    <input id="prompt-input" type="text" placeholder="Instruction pour l'agent..." onkeydown="if(event.key==='Enter') sendPrompt()" />
-    <button class="btn primary" onclick="sendPrompt()">Envoyer</button>
+    <input id="prompt-input" type="text" placeholder="Instruction pour l'agent..." />
+    <button class="btn primary" id="send-btn">Envoyer</button>
   </div>
 
   <nav class="tabs">
-    <button class="tab-btn active" onclick="switchTab('chat', this)">💬 Chat</button>
-    <button class="tab-btn" onclick="switchTab('sessions', this)">🗂️ Sessions</button>
-    <button class="tab-btn" onclick="switchTab('files', this)">📁 Workspace</button>
-    <button class="tab-btn" onclick="switchTab('approvals', this)">🛡️ Approvals</button>
+    <button class="tab-btn" data-tab="dashboard">📊 Board</button>
+    <button class="tab-btn active" data-tab="chat">💬 Activity</button>
+    <button class="tab-btn" data-tab="sessions">🗂️ Sessions</button>
+    <button class="tab-btn" data-tab="files">📁 Files</button>
+    <button class="tab-btn" data-tab="approvals">🛡️ Approve</button>
+    <button class="tab-btn" data-tab="settings">⚙️ Config</button>
   </nav>
 
   <script>
@@ -237,45 +271,86 @@
     }
 
     function haptic(ms = 25) {
-      if (navigator.vibrate) { try { navigator.vibrate(ms); } catch(e) {} }
+      if (navigator.vibrate) { try { navigator.vibrate(ms); } catch (e) {} }
     }
 
-    function toggleTheme() {
+    // Safe DOM helper: never uses innerHTML for untrusted text (eliminates XSS)
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      return node;
+    }
+
+    document.getElementById("theme-btn").addEventListener("click", () => {
       const root = document.documentElement;
-      const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-      root.setAttribute("data-theme", next);
-    }
+      root.setAttribute("data-theme", root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+    });
 
-    async function promptLogin() {
-      const pwd = prompt("Mot de passe du serveur (APP_PASSWORD) :");
-      if (pwd === null) return;
+    document.getElementById("login-btn").addEventListener("click", async () => {
+      const pwd = document.getElementById("password-field").value.trim();
       const res = await fetch("/api/v1/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pwd.trim() })
+        body: JSON.stringify({ password: pwd })
       });
       if (res.ok) {
         const data = await res.json();
         localStorage.setItem("agy_token", data.token);
+        document.getElementById("password-field").value = "";
         await initSessionAndConnect();
       } else {
-        alert("Mot de passe invalide.");
+        alert("Authentification refusée.");
       }
-    }
+    });
 
-    function switchTab(name, btn) {
-      document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
-      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-      document.getElementById(`view-${name}`).classList.add("active");
-      btn.classList.add("active");
-      if (name === "sessions") loadSessions();
-      if (name === "files") loadFiles();
-      if (name === "approvals") loadApprovals();
-    }
+    document.getElementById("logout-btn").addEventListener("click", async () => {
+      await fetch("/api/v1/auth/logout", { method: "POST", headers: authHeaders() });
+      localStorage.removeItem("agy_token");
+      if (ws) { try { ws.close(); } catch (e) {} }
+    });
+
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const name = btn.getAttribute("data-tab");
+        document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+        document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+        document.getElementById(`view-${name}`).classList.add("active");
+        btn.classList.add("active");
+        if (name === "dashboard") loadDashboard();
+        if (name === "sessions") loadSessions();
+        if (name === "files") loadFiles();
+        if (name === "approvals") loadApprovals();
+      });
+    });
+
+    document.getElementById("mode-select").addEventListener("change", async (e) => {
+      if (!currentSessionId) return;
+      await fetch(`/api/v1/sessions/${encodeURIComponent(currentSessionId)}`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ permission_mode: e.target.value })
+      });
+    });
+
+    document.getElementById("cancel-btn").addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cancel" }));
+    });
+
+    document.getElementById("new-session-btn").addEventListener("click", () => createNewSession());
+    document.getElementById("upload-btn").addEventListener("click", () => document.getElementById("upload-input").click());
+    document.getElementById("upload-input").addEventListener("change", (e) => uploadFiles(e.target.files));
+    document.getElementById("close-preview-btn").addEventListener("click", () => {
+      document.getElementById("file-preview-box").style.display = "none";
+    });
+    document.getElementById("send-btn").addEventListener("click", sendPrompt);
+    document.getElementById("prompt-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendPrompt();
+    });
 
     async function initSessionAndConnect() {
       const res = await fetch("/api/v1/sessions", { headers: authHeaders() });
-      if (res.status === 401) return;
+      if (!res.ok) return;
       const data = await res.json();
       if (data.sessions && data.sessions.length > 0) {
         const found = data.sessions.find(s => s.session_id === currentSessionId) || data.sessions[0];
@@ -305,7 +380,7 @@
       localStorage.setItem("agy_session_id", sessionId);
       document.getElementById("header-title").textContent = title || "Antigravity Pocket";
       if (mode) document.getElementById("mode-select").value = mode;
-      document.getElementById("chat-stream").innerHTML = "";
+      document.getElementById("chat-stream").replaceChildren();
       lastSequence = 0;
       activeTurnBubble = null;
       connectWebSocket();
@@ -313,10 +388,10 @@
 
     function connectWebSocket() {
       if (!currentSessionId) return;
-      if (ws) { try { ws.close(); } catch(e) {} }
+      if (ws) { try { ws.close(); } catch (e) {} }
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const token = encodeURIComponent(getToken());
-      ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${currentSessionId}?token=${token}&last_seq=${lastSequence}`);
+      ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(currentSessionId)}?token=${token}&last_seq=${lastSequence}`);
       const dot = document.getElementById("ws-dot");
       ws.onopen = () => dot.classList.remove("offline");
       ws.onclose = () => dot.classList.add("offline");
@@ -326,10 +401,9 @@
     function ensureAgentTurnContainer() {
       if (!activeTurnBubble) {
         const stream = document.getElementById("chat-stream");
-        const box = document.createElement("div");
-        box.className = "msg agent";
-        const timeline = document.createElement("div");
-        const content = document.createElement("div");
+        const box = el("div", "msg agent");
+        const timeline = el("div");
+        const content = el("div");
         box.appendChild(timeline);
         box.appendChild(content);
         stream.appendChild(box);
@@ -339,47 +413,55 @@
     }
 
     function renderTimelineEvent(ev) {
-      if (ev.sequence && ev.sequence > lastSequence) lastSequence = ev.sequence;
+      if (ev.sequence) {
+        if (ev.sequence <= lastSequence) return; // Deduplicate already processed sequence
+        lastSequence = ev.sequence;
+      }
       const stream = document.getElementById("chat-stream");
       const p = ev.payload || {};
 
       if (ev.type === "user_message") {
         activeTurnBubble = null;
-        const b = document.createElement("div");
-        b.className = "msg user";
-        b.textContent = p.text || "";
-        stream.appendChild(b);
+        stream.appendChild(el("div", "msg user", p.text || ""));
       } else if (ev.type === "session_started") {
         document.getElementById("cancel-btn").style.display = "inline-block";
         ensureAgentTurnContainer();
-      } else if (ev.type === "thought_delta") {
-        const turn = ensureAgentTurnContainer();
-        turn.timeline.innerHTML = `<div class="timeline-item">🧠 Réflexion en cours...</div>`;
       } else if (ev.type === "tool_started") {
         const turn = ensureAgentTurnContainer();
-        const item = document.createElement("div");
-        item.className = "timeline-item";
-        item.textContent = `⚙️ Outil actif : ${p.tool || "tool"} (${p.status || "running"})`;
-        turn.timeline.appendChild(item);
+        turn.timeline.appendChild(
+          el("div", "timeline-item", `⚙️ Outil : ${p.tool || "tool"} (${p.status || "running"})`)
+        );
       } else if (ev.type === "approval_required") {
         haptic(80);
         const turn = ensureAgentTurnContainer();
-        const card = document.createElement("div");
-        card.className = "approval-card";
+        const card = el("div", "approval-card");
         card.id = `card-${p.approval_id}`;
-        card.innerHTML = `
-          <div><strong>🛡️ Approbation requise (${p.tool_name})</strong></div>
-          <div style="font-size:12.5px;margin:4px 0;">${p.risk_description || ""}</div>
-          <div style="font-family:monospace;font-size:11.5px;opacity:0.85;">Cible : ${p.command_or_target || ""}</div>
-          <div style="display:flex;gap:8px;margin-top:8px;">
-            <button class="btn success" onclick="resolveApproval('${p.approval_id}', true)">✅ Approuver</button>
-            <button class="btn danger" onclick="resolveApproval('${p.approval_id}', false)">❌ Refuser</button>
-          </div>
-        `;
+        card.appendChild(el("strong", "", `🛡️ Approbation requise (${p.tool_name || "action"})`));
+        card.appendChild(el("div", "", p.risk_description || ""));
+        card.appendChild(el("div", "", `Cible : ${p.command_or_target || ""}`));
+
+        const btnRow = el("div");
+        btnRow.style.display = "flex";
+        btnRow.style.gap = "8px";
+        btnRow.style.marginTop = "8px";
+
+        const approveBtn = el("button", "btn success", "✅ Approuver");
+        approveBtn.addEventListener("click", () => resolveApproval(p.approval_id, true));
+
+        const rejectBtn = el("button", "btn danger", "❌ Refuser");
+        rejectBtn.addEventListener("click", () => resolveApproval(p.approval_id, false));
+
+        btnRow.appendChild(approveBtn);
+        btnRow.appendChild(rejectBtn);
+        card.appendChild(btnRow);
         turn.timeline.appendChild(card);
       } else if (ev.type === "approval_resolved") {
         const card = document.getElementById(`card-${p.approval_id}`);
-        if (card) card.innerHTML = `<em>Décision enregistrée : ${p.approved ? "✅ Approuvé" : "❌ Refusé"}</em>`;
+        if (card) {
+          card.replaceChildren(
+            el("em", "", `Décision enregistrée : ${p.approved ? "✅ Approuvé" : "❌ Refusé"}`)
+          );
+        }
       } else if (ev.type === "assistant_message") {
         const turn = ensureAgentTurnContainer();
         turn.content.textContent += (p.delta || "");
@@ -404,17 +486,8 @@
       input.value = "";
     }
 
-    function sendQuick(text) {
-      document.getElementById("prompt-input").value = text;
-      sendPrompt();
-    }
-
-    function cancelActiveTurn() {
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cancel" }));
-    }
-
     async function resolveApproval(approvalId, approved) {
-      await fetch(`/api/v1/approvals/${approvalId}/resolve`, {
+      await fetch(`/api/v1/approvals/${encodeURIComponent(approvalId)}/resolve`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ approved })
@@ -422,13 +495,36 @@
       loadApprovals();
     }
 
-    async function changePermissionMode(mode) {
-      if (!currentSessionId) return;
-      await fetch(`/api/v1/sessions/${currentSessionId}`, {
-        method: "PATCH",
-        headers: authHeaders(),
-        body: JSON.stringify({ permission_mode: mode })
-      });
+    async function loadDashboard() {
+      const [statusRes, sessRes, appRes] = await Promise.all([
+        fetch("/api/v1/auth/status", { headers: authHeaders() }),
+        fetch("/api/v1/sessions", { headers: authHeaders() }),
+        fetch("/api/v1/approvals", { headers: authHeaders() })
+      ]);
+      if (statusRes.ok) {
+        const st = await statusRes.json();
+        document.getElementById("kpi-engine").textContent = st.sdk_available ? "SDK Python" : (st.cli_available ? "CLI agy" : "Diagnostic");
+        document.getElementById("kpi-auth").textContent = st.auth_protected ? "Protégé (HMAC)" : "Local";
+        const notifBox = document.getElementById("dashboard-notifications");
+        notifBox.replaceChildren();
+        (st.notifications || []).forEach(n => {
+          const row = el("div", "card-box");
+          const left = el("div");
+          left.appendChild(el("strong", "", n.title));
+          left.appendChild(el("div", "", n.body));
+          row.appendChild(left);
+          notifBox.appendChild(row);
+        });
+      }
+      if (sessRes.ok) {
+        const sd = await sessRes.json();
+        document.getElementById("kpi-sessions").textContent = String((sd.sessions || []).length);
+      }
+      if (appRes.ok) {
+        const ad = await appRes.json();
+        const pending = (ad.approvals || []).filter(a => a.status === "pending").length;
+        document.getElementById("kpi-approvals").textContent = String(pending);
+      }
     }
 
     async function loadSessions() {
@@ -436,20 +532,29 @@
       if (!res.ok) return;
       const data = await res.json();
       const box = document.getElementById("sessions-list");
-      box.innerHTML = data.sessions.map(s => `
-        <div class="card-box">
-          <div onclick="selectSession('${s.session_id}', '${s.title}', '${s.permission_mode}')" style="cursor:pointer;flex:1">
-            <strong>${s.title}</strong>
-            <div style="font-size:12px;color:var(--muted)">Mode: ${s.permission_mode} • Statut: ${s.status}</div>
-          </div>
-          <button class="btn danger" onclick="deleteSession('${s.session_id}')">🗑</button>
-        </div>
-      `).join("");
-    }
+      box.replaceChildren();
+      (data.sessions || []).forEach(s => {
+        const row = el("div", "card-box");
+        const info = el("div");
+        info.style.cursor = "pointer";
+        info.style.flex = "1";
+        info.appendChild(el("strong", "", s.title));
+        const sub = el("div", "", `Mode: ${s.permission_mode} • Statut: ${s.status}`);
+        sub.style.fontSize = "12px";
+        sub.style.color = "var(--muted)";
+        info.appendChild(sub);
+        info.addEventListener("click", () => selectSession(s.session_id, s.title, s.permission_mode));
 
-    async function deleteSession(id) {
-      await fetch(`/api/v1/sessions/${id}`, { method: "DELETE", headers: authHeaders() });
-      loadSessions();
+        const delBtn = el("button", "btn danger", "🗑");
+        delBtn.addEventListener("click", async () => {
+          await fetch(`/api/v1/sessions/${encodeURIComponent(s.session_id)}`, { method: "DELETE", headers: authHeaders() });
+          loadSessions();
+        });
+
+        row.appendChild(info);
+        row.appendChild(delBtn);
+        box.appendChild(row);
+      });
     }
 
     async function loadFiles() {
@@ -457,22 +562,41 @@
       if (!res.ok) return;
       const data = await res.json();
       const box = document.getElementById("files-list");
-      if (!data.files.length) {
-        box.innerHTML = "<em>Aucun fichier dans le workspace.</em>";
+      box.replaceChildren();
+      if (!data.files || !data.files.length) {
+        box.appendChild(el("em", "", "Aucun fichier dans le workspace."));
         return;
       }
-      box.innerHTML = data.files.map(f => `
-        <div class="card-box">
-          <div>
-            <strong>${f.is_dir ? "📁" : "📄"} ${f.name}</strong>
-            <div style="font-size:11.5px;color:var(--muted)">${(f.size/1024).toFixed(1)} Ko</div>
-          </div>
-          <div style="display:flex;gap:6px;">
-            ${f.previewable ? `<button class="btn" onclick="previewFile('${f.path}')">👁 Aperçu</button>` : ""}
-            ${!f.is_dir ? `<a class="btn primary" style="text-decoration:none" href="/api/v1/files/download/${encodeURIComponent(f.path)}?token=${encodeURIComponent(getToken())}" download>⬇</a>` : ""}
-          </div>
-        </div>
-      `).join("");
+      data.files.forEach(f => {
+        const row = el("div", "card-box");
+        const left = el("div");
+        left.appendChild(el("strong", "", `${f.is_dir ? "📁" : "📄"} ${f.name}`));
+        const sub = el("div", "", `${(f.size / 1024).toFixed(1)} Ko`);
+        sub.style.fontSize = "11.5px";
+        sub.style.color = "var(--muted)";
+        left.appendChild(sub);
+
+        const actions = el("div");
+        actions.style.display = "flex";
+        actions.style.gap = "6px";
+
+        if (f.previewable) {
+          const pBtn = el("button", "btn", "👁 Aperçu");
+          pBtn.addEventListener("click", () => previewFile(f.path));
+          actions.appendChild(pBtn);
+        }
+        if (!f.is_dir) {
+          const dl = el("a", "btn primary", "⬇");
+          dl.style.textDecoration = "none";
+          dl.href = `/api/v1/files/download/${encodeURIComponent(f.path)}?token=${encodeURIComponent(getToken())}`;
+          dl.setAttribute("download", f.name);
+          actions.appendChild(dl);
+        }
+
+        row.appendChild(left);
+        row.appendChild(actions);
+        box.appendChild(row);
+      });
     }
 
     async function previewFile(path) {
@@ -497,24 +621,35 @@
       if (!res.ok) return;
       const data = await res.json();
       const box = document.getElementById("approvals-list");
-      if (!data.approvals.length) {
-        box.innerHTML = "<em>Aucune demande d'approbation en attente.</em>";
+      box.replaceChildren();
+      if (!data.approvals || !data.approvals.length) {
+        box.appendChild(el("em", "", "Aucune demande d'approbation."));
         return;
       }
-      box.innerHTML = data.approvals.map(a => `
-        <div class="card-box">
-          <div>
-            <strong>${a.tool_name} (${a.status})</strong>
-            <div style="font-size:12px;color:var(--muted)">${a.risk_description}</div>
-          </div>
-          ${a.status === "pending" ? `
-            <div style="display:flex;gap:6px;">
-              <button class="btn success" onclick="resolveApproval('${a.approval_id}', true)">✅</button>
-              <button class="btn danger" onclick="resolveApproval('${a.approval_id}', false)">❌</button>
-            </div>
-          ` : ""}
-        </div>
-      `).join("");
+      data.approvals.forEach(a => {
+        const row = el("div", "card-box");
+        const left = el("div");
+        left.appendChild(el("strong", "", `${a.tool_name} (${a.status})`));
+        const desc = el("div", "", a.risk_description);
+        desc.style.fontSize = "12px";
+        desc.style.color = "var(--muted)";
+        left.appendChild(desc);
+        row.appendChild(left);
+
+        if (a.status === "pending") {
+          const actions = el("div");
+          actions.style.display = "flex";
+          actions.style.gap = "6px";
+          const okBtn = el("button", "btn success", "✅");
+          okBtn.addEventListener("click", () => resolveApproval(a.approval_id, true));
+          const noBtn = el("button", "btn danger", "❌");
+          noBtn.addEventListener("click", () => resolveApproval(a.approval_id, false));
+          actions.appendChild(okBtn);
+          actions.appendChild(noBtn);
+          row.appendChild(actions);
+        }
+        box.appendChild(row);
+      });
     }
 
     initSessionAndConnect();
