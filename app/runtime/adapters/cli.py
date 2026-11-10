@@ -1,25 +1,33 @@
 import asyncio
+import os
 import shutil
-from typing import Dict
+import signal
+from typing import Dict, Optional
 
+from app.core.config import get_settings
 from app.core.events import EventType
 from app.core.permissions import (
     PermissionMode,
     approval_manager,
-     is_forbidden_command,
+    is_forbidden_command,
 )
 from app.runtime.base import AgentAdapter, EventEmitter
+
+MAX_CLI_OUTPUT_BYTES = 512 * 1024  # 512 KB output cap per turn
 
 
 class CLIAdapter(AgentAdapter):
     """
     Adapter for the `agy` CLI binary.
-    Never uses `--dangerously-skip-permissions`.
-    Enforces `--sandbox` and maps PermissionMode to `--mode (plan|accept-edits|auto)`.
+    - Never uses `--dangerously-skip-permissions`.
+    - Enforces pre-execution approval gate in ASSISTED mode.
+    - Reads stdout and stderr concurrently to prevent pipe deadlocks.
+    - Enforces process group termination (`os.killpg`), timeout, and exit code check.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, timeout_seconds: Optional[float] = None) -> None:
         self._processes: Dict[str, asyncio.subprocess.Process] = {}
+        self._timeout = timeout_seconds
 
     @staticmethod
     def build_cli_args(
@@ -68,7 +76,7 @@ class CLIAdapter(AgentAdapter):
             )
             return
 
-        # In ASSISTED mode, ask mobile confirmation before running write/exec CLI mode
+        # Pre-execution approval gate in ASSISTED mode before spawning subprocess
         if permission_mode == PermissionMode.ASSISTED:
             req = approval_manager.create_request(
                 session_id=session_id,
@@ -92,7 +100,6 @@ class CLIAdapter(AgentAdapter):
 
         agy_bin = shutil.which("agy")
         if not agy_bin:
-            # Diagnostic fallback if neither SDK nor CLI binary is installed in test environment
             await emit(
                 EventType.TOOL_STARTED,
                 {"tool": "workspace_diagnostic", "status": "running"},
@@ -123,33 +130,88 @@ class CLIAdapter(AgentAdapter):
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         self._processes[session_id] = proc
+        stderr_chunks: list[bytes] = []
+        total_bytes = 0
 
-        try:
+        async def _consume_stdout() -> None:
+            nonlocal total_bytes
             assert proc.stdout is not None
             while True:
-                chunk = await proc.stdout.read(256)
+                chunk = await proc.stdout.read(512)
                 if not chunk:
                     break
-                await emit(
-                    EventType.ASSISTANT_MESSAGE,
-                    {"delta": chunk.decode("utf-8", errors="replace")},
-                )
-            await proc.wait()
-            await emit(
-                EventType.TOOL_COMPLETED,
-                {"tool": "agy_cli", "exit_code": proc.returncode, "status": "completed"},
+                total_bytes += len(chunk)
+                if total_bytes <= MAX_CLI_OUTPUT_BYTES:
+                    await emit(
+                        EventType.ASSISTANT_MESSAGE,
+                        {"delta": chunk.decode("utf-8", errors="replace")},
+                    )
+
+        async def _consume_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                chunk = await proc.stderr.read(512)
+                if not chunk:
+                    break
+                if sum(len(c) for c in stderr_chunks) < 32768:
+                    stderr_chunks.append(chunk)
+
+        timeout = (
+            self._timeout
+            if self._timeout is not None
+            else get_settings().cli_timeout_seconds
+        )
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(_consume_stdout(), _consume_stderr(), proc.wait()),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            await self.cancel(session_id)
+            raise RuntimeError(
+                f"Délai d'exécution CLI dépassé ({timeout}s). Processus arrêté."
             )
         finally:
             self._processes.pop(session_id, None)
 
+        if proc.returncode != 0:
+            err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+            await emit(
+                EventType.TOOL_COMPLETED,
+                {"tool": "agy_cli", "exit_code": proc.returncode, "status": "failed"},
+            )
+            raise RuntimeError(
+                f"Le processus CLI s'est terminé avec le code {proc.returncode}"
+                + (f" : {err_text[:300]}" if err_text else ".")
+            )
+
+        await emit(
+            EventType.TOOL_COMPLETED,
+            {"tool": "agy_cli", "exit_code": 0, "status": "completed"},
+        )
+
     async def cancel(self, session_id: str) -> bool:
         proc = self._processes.get(session_id)
-        if proc and proc.returncode is None:
+        if not proc or proc.returncode is not None:
+            return False
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        except Exception:
             proc.terminate()
-            return True
-        return False
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+        return True
 
     async def close_session(self, session_id: str) -> None:
         await self.cancel(session_id)

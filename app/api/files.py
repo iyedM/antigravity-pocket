@@ -1,14 +1,27 @@
+from typing import AsyncIterator
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.security import require_auth
-from app.services.workspace_service import WorkspaceSecurityError, WorkspaceService
+from app.services.workspace_service import (
+    WorkspaceCollisionError,
+    WorkspaceSecurityError,
+    WorkspaceService,
+)
 
 router = APIRouter(prefix="/api/v1/files", tags=["files"])
 
 
 def _get_ws_service(request: Request) -> WorkspaceService:
     return request.app.state.workspace_service
+
+
+async def _iter_upload_chunks(upload: UploadFile, chunk_size: int = 65536) -> AsyncIterator[bytes]:
+    while True:
+        chunk = await upload.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
 
 
 @router.get("")
@@ -46,17 +59,24 @@ async def upload_workspace_files(
     request: Request,
     files: list[UploadFile] = File(...),
     subpath: str = Query(default=""),
+    overwrite: bool = Query(default=True),
     _: None = Depends(require_auth),
 ) -> dict:
     ws = _get_ws_service(request)
     uploaded = []
     for upload in files:
-        content = await upload.read()
         try:
-            saved = ws.save_upload(upload.filename or "file", content, subpath=subpath)
+            saved = await ws.save_upload_stream(
+                upload.filename or "file",
+                _iter_upload_chunks(upload),
+                subpath=subpath,
+                overwrite=overwrite,
+            )
             uploaded.append(saved)
         except WorkspaceSecurityError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
+        except WorkspaceCollisionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=413, detail=str(exc))
     return {"uploaded": uploaded}
