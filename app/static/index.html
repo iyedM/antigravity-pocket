@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="Antigravity" />
   <meta name="theme-color" content="#0b0f19" />
   <link rel="manifest" href="/manifest.json" />
-  <title>Antigravity Pocket v2.1</title>
+  <title>Antigravity Pocket v2.2</title>
   <style>
     :root[data-theme="dark"] {
       --bg: #0b0f19;
@@ -264,17 +264,29 @@
     let activeTurnBubble = null;
 
     function getToken() { return localStorage.getItem("agy_token") || ""; }
-    function authHeaders() {
-      const h = { "Content-Type": "application/json" };
+    function authHeaders(includeJson = true) {
+      const h = {};
+      if (includeJson) h["Content-Type"] = "application/json";
       if (getToken()) h["Authorization"] = `Bearer ${getToken()}`;
       return h;
+    }
+
+    async function requestEphemeralTicket(purpose) {
+      const res = await fetch("/api/v1/auth/ticket", {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({ purpose })
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.ticket || null;
     }
 
     function haptic(ms = 25) {
       if (navigator.vibrate) { try { navigator.vibrate(ms); } catch (e) {} }
     }
 
-    // Safe DOM helper: never uses innerHTML for untrusted text (eliminates XSS)
+    // Safe DOM helper: never uses innerHTML (eliminates XSS)
     function el(tag, className, text) {
       const node = document.createElement(tag);
       if (className) node.className = className;
@@ -354,7 +366,7 @@
       const data = await res.json();
       if (data.sessions && data.sessions.length > 0) {
         const found = data.sessions.find(s => s.session_id === currentSessionId) || data.sessions[0];
-        selectSession(found.session_id, found.title, found.permission_mode);
+        await selectSession(found.session_id, found.title, found.permission_mode);
       } else {
         await createNewSession("Session Principale");
       }
@@ -370,12 +382,12 @@
       });
       if (res.ok) {
         const data = await res.json();
-        selectSession(data.session.session_id, data.session.title, data.session.permission_mode);
+        await selectSession(data.session.session_id, data.session.title, data.session.permission_mode);
         loadSessions();
       }
     }
 
-    function selectSession(sessionId, title, mode) {
+    async function selectSession(sessionId, title, mode) {
       currentSessionId = sessionId;
       localStorage.setItem("agy_session_id", sessionId);
       document.getElementById("header-title").textContent = title || "Antigravity Pocket";
@@ -383,15 +395,16 @@
       document.getElementById("chat-stream").replaceChildren();
       lastSequence = 0;
       activeTurnBubble = null;
-      connectWebSocket();
+      await connectWebSocket();
     }
 
-    function connectWebSocket() {
+    async function connectWebSocket() {
       if (!currentSessionId) return;
       if (ws) { try { ws.close(); } catch (e) {} }
+      const ticket = await requestEphemeralTicket("ws");
+      if (!ticket) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const token = encodeURIComponent(getToken());
-      ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(currentSessionId)}?token=${token}&last_seq=${lastSequence}`);
+      ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(currentSessionId)}?ticket=${encodeURIComponent(ticket)}&last_seq=${lastSequence}`);
       const dot = document.getElementById("ws-dot");
       ws.onopen = () => dot.classList.remove("offline");
       ws.onclose = () => dot.classList.add("offline");
@@ -414,7 +427,7 @@
 
     function renderTimelineEvent(ev) {
       if (ev.sequence) {
-        if (ev.sequence <= lastSequence) return; // Deduplicate already processed sequence
+        if (ev.sequence <= lastSequence) return;
         lastSequence = ev.sequence;
       }
       const stream = document.getElementById("chat-stream");
@@ -504,7 +517,7 @@
       if (statusRes.ok) {
         const st = await statusRes.json();
         document.getElementById("kpi-engine").textContent = st.sdk_available ? "SDK Python" : (st.cli_available ? "CLI agy" : "Diagnostic");
-        document.getElementById("kpi-auth").textContent = st.auth_protected ? "Protégé (HMAC)" : "Local";
+        document.getElementById("kpi-auth").textContent = st.auth_protected ? "Protégé (HMAC+JTI)" : "Verrouillé";
         const notifBox = document.getElementById("dashboard-notifications");
         notifBox.replaceChildren();
         (st.notifications || []).forEach(n => {
@@ -586,11 +599,13 @@
           actions.appendChild(pBtn);
         }
         if (!f.is_dir) {
-          const dl = el("a", "btn primary", "⬇");
-          dl.style.textDecoration = "none";
-          dl.href = `/api/v1/files/download/${encodeURIComponent(f.path)}?token=${encodeURIComponent(getToken())}`;
-          dl.setAttribute("download", f.name);
-          actions.appendChild(dl);
+          const dlBtn = el("button", "btn primary", "⬇");
+          dlBtn.addEventListener("click", async () => {
+            const tkt = await requestEphemeralTicket("download");
+            if (!tkt) return;
+            window.location.href = `/api/v1/files/download/${encodeURIComponent(f.path)}?ticket=${encodeURIComponent(tkt)}`;
+          });
+          actions.appendChild(dlBtn);
         }
 
         row.appendChild(left);
@@ -612,7 +627,11 @@
       if (!fileList || !fileList.length) return;
       const fd = new FormData();
       for (const f of fileList) fd.append("files", f);
-      await fetch(`/api/v1/files/upload?token=${encodeURIComponent(getToken())}`, { method: "POST", body: fd });
+      await fetch("/api/v1/files/upload", {
+        method: "POST",
+        headers: authHeaders(false),
+        body: fd
+      });
       loadFiles();
     }
 

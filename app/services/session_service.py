@@ -2,9 +2,9 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.core.config import get_settings
 from app.core.events import EventEnvelope, EventType
@@ -14,7 +14,7 @@ from app.core.permissions import PermissionMode
 class SessionService:
     """SQLite-backed multi-session and numbered event timeline store."""
 
-    def __init__(self, db_path: Optional[Path] = None) -> None:
+    def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or get_settings().db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -60,14 +60,14 @@ class SessionService:
     def create_session(
         self,
         title: str = "Nouvelle session",
-        workspace: Optional[str] = None,
+        workspace: str | None = None,
         permission_mode: str = PermissionMode.ASSISTED.value,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         settings = get_settings()
         ws = workspace or str(settings.workspace_dir)
         mode = PermissionMode(permission_mode).value
         session_id = f"sess_{uuid.uuid4().hex[:10]}"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -79,22 +79,22 @@ class SessionService:
             )
         return self.get_session(session_id)  # type: ignore[return-value]
 
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
             ).fetchone()
             return dict(row) if row else None
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
+    def list_sessions(self) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM sessions ORDER BY updated_at DESC"
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update_session_status(self, session_id: str, status: str) -> Optional[Dict[str, Any]]:
-        now = datetime.now(timezone.utc).isoformat()
+    def update_session_status(self, session_id: str, status: str) -> dict[str, Any] | None:
+        now = datetime.now(UTC).isoformat()
         with self._lock, self._connect() as conn:
             conn.execute(
                 "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
@@ -104,9 +104,9 @@ class SessionService:
 
     def update_permission_mode(
         self, session_id: str, permission_mode: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         mode = PermissionMode(permission_mode).value
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._lock, self._connect() as conn:
             conn.execute(
                 "UPDATE sessions SET permission_mode = ?, updated_at = ? WHERE session_id = ?",
@@ -125,9 +125,9 @@ class SessionService:
         self,
         session_id: str,
         event_type: EventType,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> EventEnvelope:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 "SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM events WHERE session_id = ?",
@@ -163,7 +163,7 @@ class SessionService:
 
     def get_events_since(
         self, session_id: str, after_sequence: int = 0
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """

@@ -9,6 +9,8 @@ WEAK_SECRETS = frozenset(
         "changemenow!",
         "changemewithastrongpassword2026!",
         "replace_with_random_64_hex_secret",
+        "0123456789abcdef0123456789abcdef",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "password",
         "admin",
         "123456",
@@ -18,29 +20,34 @@ WEAK_SECRETS = frozenset(
 _PROCESS_SECRET_KEY = secrets.token_hex(32)
 
 
+def is_strong_secret_value(val: str, min_len: int = 8) -> bool:
+    cleaned = val.strip()
+    if len(cleaned) < min_len:
+        return False
+    if cleaned.lower() in WEAK_SECRETS:
+        return False
+    if "0123456789abcdef" in cleaned.lower():
+        return False
+    return len(set(cleaned.lower())) >= 5
+
+
 def _load_or_create_secret_key() -> str:
     env_key = os.environ.get("APP_SECRET_KEY", "").strip()
-    if env_key and env_key.lower() not in WEAK_SECRETS and len(env_key) >= 32:
+    if is_strong_secret_value(env_key, min_len=32):
         return env_key
     return _PROCESS_SECRET_KEY
 
 
 @dataclass
 class Settings:
-    """Centralized application settings with persistent secret key and fail-closed auth."""
+    """Centralized application settings with mandatory fail-closed authentication."""
 
     app_name: str = "Antigravity Pocket"
-    version: str = "2.1.0"
+    version: str = "2.2.0"
     app_password: str = field(
         default_factory=lambda: os.environ.get("APP_PASSWORD", "").strip()
     )
     secret_key: str = field(default_factory=_load_or_create_secret_key)
-    allow_unauthenticated_local: bool = field(
-        default_factory=lambda: os.environ.get(
-            "AGY_ALLOW_UNAUTHENTICATED_LOCAL", "false"
-        ).lower()
-        == "true"
-    )
     workspace_dir: Path = field(
         default_factory=lambda: Path(
             os.environ.get("AGY_WORKSPACE", str(Path.home() / "workspace"))
@@ -75,11 +82,7 @@ class Settings:
     )
 
     def is_password_configured_and_strong(self) -> bool:
-        return (
-            bool(self.app_password)
-            and self.app_password.lower() not in WEAK_SECRETS
-            and len(self.app_password) >= 8
-        )
+        return is_strong_secret_value(self.app_password, min_len=8)
 
     def ensure_directories(self) -> None:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)

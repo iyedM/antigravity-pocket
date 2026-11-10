@@ -1,8 +1,8 @@
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Dict
+from typing import Any
 
 
 class EventType(str, Enum):
@@ -28,13 +28,13 @@ class EventEnvelope:
     session_id: str
     sequence: int
     type: EventType
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
     event_id: str = field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:12]}")
     timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "session_id": self.session_id,

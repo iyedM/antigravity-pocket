@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, Callable, Coroutine, Dict, Optional, Set
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from app.core.events import EventEnvelope, EventType
 from app.core.permissions import PermissionMode
@@ -20,14 +21,14 @@ class AgentRuntimeManager:
 
     def __init__(
         self,
-        session_service: Optional[SessionService] = None,
-        adapter: Optional[AgentAdapter] = None,
+        session_service: SessionService | None = None,
+        adapter: AgentAdapter | None = None,
     ) -> None:
         self.session_service = session_service or SessionService()
         self.adapter = adapter or self._select_default_adapter()
-        self._subscribers: Dict[str, Set[SubscriberCallback]] = {}
-        self._running_tasks: Dict[str, asyncio.Task] = {}
-        self._session_locks: Dict[str, asyncio.Lock] = {}
+        self._subscribers: dict[str, set[SubscriberCallback]] = {}
+        self._running_tasks: dict[str, asyncio.Task] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _select_default_adapter() -> AgentAdapter:
@@ -51,14 +52,14 @@ class AgentRuntimeManager:
             self._subscribers[session_id].discard(callback)
 
     async def emit_event(
-        self, session_id: str, event_type: EventType, payload: Dict[str, Any]
+        self, session_id: str, event_type: EventType, payload: dict[str, Any]
     ) -> EventEnvelope:
         envelope = self.session_service.append_event(session_id, event_type, payload)
         for sub in list(self._subscribers.get(session_id, set())):
             try:
                 await sub(envelope)
-            except Exception:
-                pass
+            except RuntimeError:
+                continue
         return envelope
 
     async def run_turn(self, session_id: str, prompt: str) -> None:
@@ -79,7 +80,7 @@ class AgentRuntimeManager:
             )
             await self.emit_event(session_id, EventType.USER_MESSAGE, {"text": prompt})
 
-            async def _adapter_emit(ev_type: EventType, data: Dict[str, Any]) -> None:
+            async def _adapter_emit(ev_type: EventType, data: dict[str, Any]) -> None:
                 if ev_type == EventType.APPROVAL_REQUIRED:
                     self.session_service.update_session_status(
                         session_id, "waiting_approval"
@@ -128,31 +129,44 @@ class AgentRuntimeManager:
                     EventType.SESSION_ERROR,
                     {"error": "Tâche interrompue à la demande de l'utilisateur."},
                 )
-            except Exception as exc:
+                raise
+            except Exception as exc:  # noqa: BLE001
                 self.session_service.update_session_status(session_id, "error")
                 await self.emit_event(
                     session_id, EventType.SESSION_ERROR, {"error": str(exc)}
                 )
 
+    async def _cancel_specific_task(
+        self, session_id: str, target_task: asyncio.Task
+    ) -> None:
+        """Cancels a specific running task without touching newly scheduled tasks."""
+        await self.adapter.cancel(session_id)
+        if not target_task.done():
+            target_task.cancel()
+            await asyncio.gather(target_task, return_exceptions=True)
+
     def start_background_turn(self, session_id: str, prompt: str) -> asyncio.Task:
-        existing = self._running_tasks.get(session_id)
+        """
+        Safely replaces any active turn for `session_id`:
+        captures `previous_task` explicitly before registering `new_task` so
+        `new_task` never cancels itself.
+        """
+        previous_task = self._running_tasks.get(session_id)
 
         async def _serialized_runner() -> None:
-            if existing and not existing.done():
-                await self.cancel_turn(session_id)
-                await asyncio.gather(existing, return_exceptions=True)
+            if previous_task is not None and not previous_task.done():
+                await self._cancel_specific_task(session_id, previous_task)
             await self.run_turn(session_id, prompt)
 
-        task = asyncio.create_task(_serialized_runner())
-        self._running_tasks[session_id] = task
-        return task
+        new_task = asyncio.create_task(_serialized_runner())
+        self._running_tasks[session_id] = new_task
+        return new_task
 
     async def cancel_turn(self, session_id: str) -> bool:
-        await self.adapter.cancel(session_id)
         task = self._running_tasks.get(session_id)
         if task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await self._cancel_specific_task(session_id, task)
             return True
+        await self.adapter.cancel(session_id)
         self.session_service.update_session_status(session_id, "cancelled")
         return False

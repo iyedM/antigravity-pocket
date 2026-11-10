@@ -1,8 +1,9 @@
 import mimetypes
 import os
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any
 
 from app.core.config import get_settings
 
@@ -48,9 +49,9 @@ class WorkspaceService:
 
     def __init__(
         self,
-        workspace_root: Optional[Path] = None,
-        max_upload_bytes: Optional[int] = None,
-        max_workspace_bytes: Optional[int] = None,
+        workspace_root: Path | None = None,
+        max_upload_bytes: int | None = None,
+        max_workspace_bytes: int | None = None,
     ) -> None:
         settings = get_settings()
         self.root = (workspace_root or settings.workspace_dir).resolve()
@@ -106,12 +107,12 @@ class WorkspaceService:
 
         return resolved
 
-    def list_files(self, subpath: str = "") -> List[Dict[str, Any]]:
+    def list_files(self, subpath: str = "") -> list[dict[str, Any]]:
         target_dir = self.resolve_safe_path(subpath)
         if not target_dir.exists() or not target_dir.is_dir():
             raise FileNotFoundError("Dossier introuvable dans le workspace.")
 
-        items: List[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         for entry in sorted(
             target_dir.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
         ):
@@ -165,7 +166,7 @@ class WorkspaceService:
         content: bytes,
         subpath: str = "",
         overwrite: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if len(content) > self.max_upload_bytes:
             raise ValueError(
                 f"Fichier trop volumineux ({len(content)} octets). Maximum : {self.max_upload_bytes} octets."
@@ -207,7 +208,7 @@ class WorkspaceService:
         chunks: AsyncIterator[bytes],
         subpath: str = "",
         overwrite: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Streams upload chunks directly to a temporary file before atomic replace."""
         target_dir, dest, safe_name = self._prepare_upload_destination(
             filename, subpath, overwrite
@@ -244,7 +245,7 @@ class WorkspaceService:
             "size": written,
         }
 
-    def preview_file(self, relative_path: str, max_bytes: int = 65536) -> Dict[str, Any]:
+    def preview_file(self, relative_path: str, max_bytes: int = 65536) -> dict[str, Any]:
         target = self.resolve_safe_path(relative_path)
         if not target.is_file():
             raise FileNotFoundError("Fichier introuvable.")

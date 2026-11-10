@@ -1,10 +1,11 @@
 import asyncio
 import json
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.events import EventEnvelope
 from app.core.permissions import approval_manager
-from app.core.security import verify_signed_token
+from app.core.security import ticket_store, verify_signed_token
 
 router = APIRouter(tags=["websocket"])
 
@@ -12,23 +13,34 @@ router = APIRouter(tags=["websocket"])
 @router.websocket("/ws/sessions/{session_id}")
 async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     """
-    Gapless WebSocket event stream:
-    1. Subscribes to live events into a buffer queue BEFORE querying SQLite.
-    2. Replays missed events (`sequence > last_seq`) from SQLite and tracks `high_water_seq`.
-    3. Drains buffered and future live events, deduplicating any `sequence <= high_water_seq`.
+    Gapless WebSocket event stream authenticated via single-use ephemeral `ticket`
+    (or Authorization header) so Bearer tokens never appear in URL query strings.
     """
     await websocket.accept()
-    token = websocket.query_params.get("token", "")
+    ticket = websocket.query_params.get("ticket", "").strip()
+    auth_header = websocket.headers.get("authorization", "")
+    bearer_token = (
+        auth_header[7:].strip()
+        if auth_header.lower().startswith("bearer ")
+        else ""
+    )
+
     try:
         last_seq = max(0, int(websocket.query_params.get("last_seq", "0") or "0"))
     except ValueError:
         last_seq = 0
 
-    if not verify_signed_token(token):
+    authenticated = False
+    if ticket and ticket_store.consume_ticket(ticket, expected_purpose="ws") or bearer_token and verify_signed_token(bearer_token):
+        authenticated = True
+
+    if not authenticated:
         await websocket.send_json(
             {
                 "type": "session_error",
-                "payload": {"error": "Non autorisé : jeton ou mot de passe invalide."},
+                "payload": {
+                    "error": "Non autorisé : ticket éphémère invalide ou expiré."
+                },
             }
         )
         await websocket.close(code=1008)

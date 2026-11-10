@@ -1,100 +1,62 @@
-# 🚀 Antigravity Pocket v2.1.0
+# 🚀 Antigravity Pocket v2.2.0 (Release Candidate)
 
 > **Compagnon Mobile Open-Source (iOS & Android PWA) pour superviser et contrôler vos agents Google Antigravity.**
 > *Avis : Antigravity Pocket est un projet communautaire indépendant et n'est pas un produit officiel de Google.*
 
 ---
 
-## 🎯 Vision & Garanties (v2.1.0)
+## ✨ Garanties Techniques Vérifiées (v2.2.0)
 
-**Antigravity Pocket v2.1.0** se concentre sur cinq fonctionnalités fiables, auditées et couvertes par des tests automatisés :
-
-1. **Supervision Multi-Sessions (SQLite)** : Créez, reprenez, isolez et annulez (`⏹ Stop`) vos sessions d'agents avec sérialisation par verrou (`asyncio.Lock`) et sans mutation globale du répertoire courant.
-2. **Contrôle d'Exécution à 3 Niveaux (`read_only`, `assisted`, `autonomous`)** :
-   - En mode `assisted`, une **porte d'approbation pré-exécution** bloque le lancement de l'agent tant que vous n'avez pas validé l'opération depuis votre téléphone (`✅ Approuver` / `❌ Refuser`).
-   - En mode CLI, `agy` est toujours exécuté avec `--sandbox` et `--mode (plan|accept-edits|auto)` (jamais `--dangerously-skip-permissions`).
-3. **Synchronisation WebSocket Sans Perte (`Subscribe-First Replay`)** : Lorsqu'un téléphone (iPhone / Android) se reconnecte après une coupure réseau, le serveur met en file d'attente le flux temps réel *avant* de rejouer les événements manqués (`last_seq`), puis déduplique par `sequence`.
-4. **Explorateur de Fichiers Sécurisé (Anti-TOCTOU & Écriture Atomique)** : Upload en streaming par chunks, quotas par fichier et global, politique de collision explicite (`409 Conflict`), aperçu avec `O_NOFOLLOW` et blocage des liens symboliques.
-5. **Interface Mobile de Supervision Anti-XSS (6 Onglets)** : *Dashboard*, *Activity & Chat* (résumés d'outils sans exposition des pensées internes `thought_delta`), *Sessions*, *Workspace*, *Approvals* et *Settings* (connexion/déconnexion avec révocation de jeton `JTI`), construite exclusivement avec l'API DOM (`textContent`, zéro `.innerHTML`).
+1. **Authentification Fail-Closed, Révocation SQLite & Tickets à Usage Unique** :
+   - Authentification obligatoire dans tous les modes (aucun contournement local non authentifié, rejet des secrets faibles ou séquentiels).
+   - Révocation persistante des jetons (`jti`) stockée dans SQLite (`revoked_tokens`).
+   - Échange de **tickets éphémères à usage unique (30s)** (`POST /api/v1/auth/ticket`) pour l'ouverture du WebSocket et le téléchargement de fichiers : le jeton Bearer principal n'est **jamais** exposé dans les URL.
+2. **Intégration Réelle des Politiques du SDK `google-antigravity` (`v0.1.23+`) & du CLI `agy` (`v1.5.3+`)** :
+   - **Avec `SDKAdapter`** : Utilise `LocalAgentConfig(workspaces=[workspace], capabilities=..., policies=...)` avec `BuiltinTools.read_only()`, `policy.workspace_only([workspace])` et `policy.safe_defaults(handler=...)` (`PreToolCallDecideHook`).
+   - **Avec `CLIAdapter`** : Utilise `agy --print --sandbox --mode (plan|accept-edits|auto)` avec validation préalable du lancement du tour en mode `assisted`.
+3. **Remplacement de Tâche Sans Conflit & Annulation Réelle** :
+   - Séparation explicite entre `previous_task` et `new_task` dans `AgentRuntimeManager`.
+   - Annulation réelle de la tâche asyncio du SDK (`sdk_task.cancel()`) et terminaison du groupe de processus CLI (`os.killpg`).
+4. **Synchronisation WebSocket Sans Perte (`Subscribe-First Replay`)** :
+   - Abonnement à la file d'événements en direct *avant* la relecture SQLite (`last_seq`) et déduplication par `sequence`.
+5. **Explorateur de Fichiers Atomique & Interface Mobile 6 Onglets Anti-XSS** :
+   - Streaming par chunks, écriture atomique (`tempfile` + `os.replace`), lecture `O_NOFOLLOW`, quotas et 0 utilisation de `.innerHTML`.
 
 ---
 
-## 📊 État des Fonctionnalités (Transparence v2.1.0)
+## 📊 Transparence : Périmètre Exact des Contrôles (v2.2.0)
 
-| Fonctionnalité | État dans v2.1.0 |
+| Mécanisme | Comportement garanti dans v2.2.0 |
 | :--- | :--- |
-| Authentification HMAC-SHA256 Fail-Closed + Révocation JTI + Rate Limiting | ✅ Garanti & Testé |
-| Porte d'approbation pré-exécution (`read_only` / `assisted` / `autonomous`) | ✅ Garanti & Testé |
-| Multi-sessions SQLite + Sérialisation des tâches + Annulation groupe de processus (`killpg`) | ✅ Garanti & Testé |
-| Reconnexion WebSocket sans perte ni doublon (`Subscribe-First` + `sequence`) | ✅ Garanti & Testé |
-| File Manager atomique (Chunks, Quotas, Anti-Traversal, Anti-Symlink, `O_NOFOLLOW`) | ✅ Garanti & Testé |
-| Frontend PWA 6 onglets 100 % sans `.innerHTML` (Protection XSS) | ✅ Garanti & Testé |
-| Notifications Push Web natives (APNs / WebPush hors-ligne) | 🚧 Prévu pour v2.2 (fil d'activité local en v2.1) |
+| **Mode `read_only` (SDK)** | Restreint `enabled_tools` à `BuiltinTools.read_only()` et applique `policy.deny_all()` + liste blanche lecture. |
+| **Mode `assisted` (SDK)** | Validation préalable du tour + interception outil par outil via `policy.safe_defaults(handler=...)` et `policy.workspace_only()`. |
+| **Mode `assisted` (CLI `agy`)** | Validation préalable avant le lancement du sous-processus `agy --sandbox --mode accept-edits` (le CLI en mode `--print` ne supporte pas l'interception interactive outil par outil). |
+| **Authentification WebSocket / Download** | Ticket éphémère à usage unique (`tkt_...`, validité 30s), aucun jeton Bearer dans les query parameters. |
+| **Révocation de session (`Logout`)** | Persistée sur disque dans la table SQLite `revoked_tokens` (survit aux redémarrages). |
 
 ---
 
-## 🏗️ Architecture du Dépôt
-
-```text
-antigravity-pocket/
-├── app/
-│   ├── main.py                      # Application FastAPI & initialisation des services
-│   ├── api/
-│   │   ├── auth.py                  # Login, Logout (révocation JTI) & Statut
-│   │   ├── sessions.py              # CRUD Sessions, Permissions & Approbations
-│   │   ├── files.py                 # Streaming Upload, Preview, List & Download
-│   │   └── websocket.py             # Subscribe-First Replay & Streaming temps réel
-│   ├── core/
-│   │   ├── config.py                # Configuration fail-closed & clé secrète persistante
-│   │   ├── security.py              # Jetons HMAC, JTI Revocation, RateLimiter & Safe Tar Extract
-│   │   ├── permissions.py           # Politique Read-Only / Assisted / Autonomous & ApprovalManager
-│   │   └── events.py                # Protocole standardisé EventEnvelope (sequence)
-│   ├── runtime/
-│   │   ├── base.py                  # Interface abstraite AgentAdapter
-│   │   ├── manager.py               # Orchestrateur de sessions avec verrous asyncio.Lock
-│   │   └── adapters/
-│   │       ├── sdk.py               # Adapter google-antigravity SDK (sans os.chdir)
-│   │       └── cli.py               # Adapter CLI agy (stdout+stderr concurrents, timeout, killpg)
-│   ├── services/
-│   │   ├── session_service.py       # Persistance SQLite WAL
-│   │   ├── workspace_service.py     # Isolation workspace, écriture atomique & quotas
-│   │   └── notification_service.py  # Journal d'activité
-│   └── static/
-│       ├── index.html               # Interface PWA de supervision à 6 onglets (zéro innerHTML)
-│       ├── manifest.json            # Manifeste PWA
-│       └── sw.js                    # Service Worker
-├── tests/                           # 22 tests unitaires, sécurité & intégration (Pytest)
-├── scripts/
-│   ├── install_local.sh             # Installation locale sécurisée
-│   └── export_encrypted_bundle.py   # Chiffrement AES-256-GCM optionnel
-├── Dockerfile
-├── docker-compose.yml               # Écoute locale 127.0.0.1 par défaut, secrets obligatoires
-├── .env.example
-├── SECURITY.md
-└── LICENSE
-```
-
----
-
-## 🚀 Installation & Démarrage Rapide (Local-First Recommandé)
+## 🚀 Installation & Démarrage Rapide
 
 ```bash
 # 1. Installer l'environnement virtuel et les dépendances
 ./scripts/install_local.sh
 
-# 2. Configurer obligatoirement votre mot de passe fort et votre clé secrète HMAC
-export APP_PASSWORD="VotreMotDePasseFort2026!"
+# 2. Générer et exporter vos secrets aléatoires obligatoires
+export APP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
 export APP_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+echo "Votre mot de passe mobile : $APP_PASSWORD"
 
-# 3. Lancer le serveur (écoute locale par défaut, exposez via Tailscale / Cloudflare Tunnel avec TLS)
+# 3. Démarrer le serveur en écoute locale (127.0.0.1)
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 7860
 ```
 
 ---
 
-## 🧪 Exécuter la Suite de Tests (22 Tests)
+## 🧪 Exécuter l'Analyse Statique (`Ruff`) & la Suite de Tests (`Pytest`)
 
 ```bash
+.venv/bin/ruff check app/ tests/
 .venv/bin/pytest tests/ -v
 ```
 

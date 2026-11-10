@@ -2,7 +2,6 @@ import asyncio
 import os
 import shutil
 import signal
-from typing import Dict, Optional
 
 from app.core.config import get_settings
 from app.core.events import EventType
@@ -25,8 +24,8 @@ class CLIAdapter(AgentAdapter):
     - Enforces process group termination (`os.killpg`), timeout, and exit code check.
     """
 
-    def __init__(self, timeout_seconds: Optional[float] = None) -> None:
-        self._processes: Dict[str, asyncio.subprocess.Process] = {}
+    def __init__(self, timeout_seconds: float | None = None) -> None:
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._timeout = timeout_seconds
 
     @staticmethod
@@ -170,7 +169,7 @@ class CLIAdapter(AgentAdapter):
                 asyncio.gather(_consume_stdout(), _consume_stderr(), proc.wait()),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await self.cancel(session_id)
             raise RuntimeError(
                 f"Délai d'exécution CLI dépassé ({timeout}s). Processus arrêté."
@@ -202,14 +201,14 @@ class CLIAdapter(AgentAdapter):
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except ProcessLookupError:
             return False
-        except Exception:
+        except OSError:
             proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
+            except OSError:
                 proc.kill()
         return True
 

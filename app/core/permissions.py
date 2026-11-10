@@ -1,9 +1,8 @@
 import asyncio
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Dict, Optional, Tuple
 
 
 class PermissionMode(str, Enum):
@@ -40,7 +39,7 @@ def is_forbidden_command(command_or_args: str) -> bool:
     return any(pat in lowered for pat in FORBIDDEN_PATTERNS)
 
 
-def classify_operation(tool_name: str, args_summary: str) -> Tuple[bool, str]:
+def classify_operation(tool_name: str, args_summary: str) -> tuple[bool, str]:
     """
     Returns (is_sensitive, risk_description).
     Read-only tools (read_file, list_files, search) are non-sensitive.
@@ -66,9 +65,9 @@ class ApprovalRequest:
     risk_description: str
     status: str = "pending"  # pending | approved | rejected
     created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
-    resolved_at: Optional[str] = None
+    resolved_at: str | None = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def to_dict(self) -> dict:
@@ -89,7 +88,7 @@ class ApprovalManager:
     """Manages pending mobile approval cards and policy checks per session."""
 
     def __init__(self) -> None:
-        self._pending: Dict[str, ApprovalRequest] = {}
+        self._pending: dict[str, ApprovalRequest] = {}
 
     def create_request(
         self,
@@ -110,12 +109,12 @@ class ApprovalManager:
         self._pending[req.approval_id] = req
         return req
 
-    def resolve(self, approval_id: str, approved: bool) -> Optional[ApprovalRequest]:
+    def resolve(self, approval_id: str, approved: bool) -> ApprovalRequest | None:
         req = self._pending.get(approval_id)
         if not req:
             return None
         req.status = "approved" if approved else "rejected"
-        req.resolved_at = datetime.now(timezone.utc).isoformat()
+        req.resolved_at = datetime.now(UTC).isoformat()
         req._event.set()
         return req
 
@@ -126,12 +125,12 @@ class ApprovalManager:
         try:
             await asyncio.wait_for(req._event.wait(), timeout=timeout)
             return req.status == "approved"
-        except asyncio.TimeoutError:
+        except TimeoutError:
             req.status = "rejected"
-            req.resolved_at = datetime.now(timezone.utc).isoformat()
+            req.resolved_at = datetime.now(UTC).isoformat()
             return False
 
-    def list_for_session(self, session_id: Optional[str] = None) -> list[dict]:
+    def list_for_session(self, session_id: str | None = None) -> list[dict]:
         items = list(self._pending.values())
         if session_id:
             items = [r for r in items if r.session_id == session_id]

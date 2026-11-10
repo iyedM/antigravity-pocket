@@ -1,4 +1,6 @@
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
@@ -57,7 +59,7 @@ async def preview_workspace_file(
 @router.post("/upload")
 async def upload_workspace_files(
     request: Request,
-    files: list[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     subpath: str = Query(default=""),
     overwrite: bool = Query(default=True),
     _: None = Depends(require_auth),

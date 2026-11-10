@@ -1,6 +1,6 @@
-from typing import Optional
-from pydantic import BaseModel
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from app.core.permissions import PermissionMode, approval_manager
 from app.core.security import require_auth
@@ -107,7 +107,7 @@ async def delete_session(
 
 @router.get("/approvals")
 async def list_approvals(
-    session_id: Optional[str] = Query(default=None),
+    session_id: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ) -> dict:
     return {"approvals": approval_manager.list_for_session(session_id)}

@@ -1,8 +1,8 @@
 import shutil
 from pathlib import Path
-from typing import Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from app.core.config import get_settings
 from app.core.security import (
@@ -11,6 +11,7 @@ from app.core.security import (
     rate_limiter,
     require_auth,
     revoke_signed_token,
+    ticket_store,
     verify_password_constant_time,
 )
 from app.services.notification_service import notification_service
@@ -22,15 +23,18 @@ class LoginRequest(BaseModel):
     password: str = ""
 
 
+class TicketRequest(BaseModel):
+    purpose: str = "ws"
+
+
 @router.post("/login")
 async def login(payload: LoginRequest, request: Request) -> dict:
     settings = get_settings()
     if not settings.is_password_configured_and_strong():
-        if not settings.allow_unauthenticated_local:
-            raise HTTPException(
-                status_code=503,
-                detail="Serveur verrouillé : APP_PASSWORD (min 8 caractères) doit être configuré.",
-            )
+        raise HTTPException(
+            status_code=503,
+            detail="Serveur verrouillé : APP_PASSWORD fort (min 8 caractères) doit être configuré.",
+        )
 
     client_ip = request.client.host if request.client else "unknown"
     if not rate_limiter.check_allowed(client_ip):
@@ -39,9 +43,7 @@ async def login(payload: LoginRequest, request: Request) -> dict:
             detail="Trop de tentatives échouées. Réessayez dans 60 secondes.",
         )
 
-    if settings.is_password_configured_and_strong() and not verify_password_constant_time(
-        payload.password, settings.app_password
-    ):
+    if not verify_password_constant_time(payload.password, settings.app_password):
         rate_limiter.record_failure(client_ip)
         raise HTTPException(status_code=401, detail="Mot de passe incorrect.")
 
@@ -54,14 +56,25 @@ async def login(payload: LoginRequest, request: Request) -> dict:
     }
 
 
-@router.post("/logout")
-async def logout(
-    authorization: Optional[str] = Header(default=None),
-    x_auth_token: Optional[str] = Header(default=None),
-    token: Optional[str] = Query(default=None),
+@router.post("/ticket")
+async def issue_single_use_ticket(
+    payload: TicketRequest,
     _: None = Depends(require_auth),
 ) -> dict:
-    raw_token = extract_request_token(authorization, x_auth_token, token)
+    """Issues a 30-second single-use ticket for WebSocket or download requests."""
+    if payload.purpose not in ("ws", "download"):
+        raise HTTPException(status_code=400, detail="Purpose invalide.")
+    ticket = ticket_store.issue_ticket(purpose=payload.purpose, ttl_seconds=30)
+    return {"ticket": ticket, "expires_in": 30}
+
+
+@router.post("/logout")
+async def logout(
+    authorization: str | None = Header(default=None),
+    x_auth_token: str | None = Header(default=None),
+    _: None = Depends(require_auth),
+) -> dict:
+    raw_token = extract_request_token(authorization, x_auth_token)
     revoked = revoke_signed_token(raw_token)
     return {"ok": True, "revoked": revoked}
 

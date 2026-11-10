@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
@@ -16,7 +15,7 @@ from app.services.workspace_service import WorkspaceService
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def restore_encrypted_bundle_if_present(dest_root: Optional[Path] = None) -> None:
+def restore_encrypted_bundle_if_present(dest_root: Path | None = None) -> None:
     """
     Optional Cloud helper: decrypts and safely extracts an AES-256-GCM bundle
     using strict allowlist validation (`safe_extract_tar_bundle`).
@@ -28,11 +27,11 @@ def restore_encrypted_bundle_if_present(dest_root: Optional[Path] = None) -> Non
     try:
         raw_tar = decrypt_bundle_aes_gcm(enc_bundle, passphrase)
         safe_extract_tar_bundle(raw_tar, dest_root or Path.home())
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         print(f"[Antigravity Pocket] Échec de restauration sécurisée : {exc}")
 
 
-def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
+def create_app(custom_settings: Settings | None = None) -> FastAPI:
     restore_encrypted_bundle_if_present()
     settings = custom_settings or get_settings()
     settings.ensure_directories()

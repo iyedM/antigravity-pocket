@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, Dict
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from app.core.events import EventType
 from app.core.permissions import PermissionMode
 
-EventEmitter = Callable[[EventType, Dict[str, Any]], Awaitable[None]]
+EventEmitter = Callable[[EventType, dict[str, Any]], Awaitable[None]]
 
 
 class AgentAdapter(ABC):
