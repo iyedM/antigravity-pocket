@@ -7,6 +7,9 @@ from app.core.permissions import (
     classify_operation,
     is_forbidden_command,
 )
+from app.runtime.adapters.cli import CLIAdapter
+from app.runtime.manager import AgentRuntimeManager
+from app.services.session_service import SessionService
 
 
 def test_classify_operations() -> None:
@@ -46,5 +49,45 @@ def test_approval_manager_async_workflow() -> None:
         decision = await manager.wait_for_decision(req.approval_id, timeout=1.0)
         assert decision is True
         assert req.status == "approved"
+
+    asyncio.run(_run())
+
+
+def test_cli_adapter_never_uses_dangerously_skip_permissions() -> None:
+    for mode, expected_flag in [
+        (PermissionMode.READ_ONLY, "plan"),
+        (PermissionMode.ASSISTED, "accept-edits"),
+        (PermissionMode.AUTONOMOUS, "auto"),
+    ]:
+        args = CLIAdapter.build_cli_args("/usr/bin/agy", "/tmp/ws", mode, "test prompt")
+        assert "--dangerously-skip-permissions" not in args
+        assert "--sandbox" in args
+        assert expected_flag in args
+
+
+def test_runtime_manager_persists_timeline_events(tmp_path) -> None:
+    async def _run() -> None:
+        session_svc = SessionService(db_path=tmp_path / "rt.db")
+        manager = AgentRuntimeManager(session_service=session_svc, adapter=CLIAdapter())
+        sess = session_svc.create_session(
+            title="Test Runtime",
+            workspace=str(tmp_path),
+            permission_mode=PermissionMode.READ_ONLY.value,
+        )
+        # Force diagnostic fallback by hiding 'agy' in PATH temporarily if needed
+        import shutil
+        orig_which = shutil.which
+        shutil.which = lambda _: None
+        try:
+            await manager.run_turn(sess["session_id"], "Bonjour agent")
+        finally:
+            shutil.which = orig_which
+
+        events = session_svc.get_events_since(sess["session_id"], 0)
+        event_types = [e["type"] for e in events]
+        assert "session_started" in event_types
+        assert "user_message" in event_types
+        assert "assistant_message" in event_types
+        assert "session_completed" in event_types
 
     asyncio.run(_run())
