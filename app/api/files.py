@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from app.core.security import require_auth
+from app.core.security import require_auth, require_download_auth
 from app.services.workspace_service import (
     WorkspaceCollisionError,
     WorkspaceSecurityError,
@@ -88,7 +88,7 @@ async def upload_workspace_files(
 async def download_workspace_file(
     filepath: str,
     request: Request,
-    _: None = Depends(require_auth),
+    _: None = Depends(require_download_auth),
 ) -> FileResponse:
     ws = _get_ws_service(request)
     try:

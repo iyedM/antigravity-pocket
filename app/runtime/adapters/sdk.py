@@ -42,6 +42,35 @@ class SDKAdapter(AgentAdapter):
         )
         from google.antigravity.hooks import policy
 
+        ws_root = Path(workspace).resolve()
+
+        def _is_outside_workspace(args: dict[str, Any]) -> bool:
+            if not isinstance(args, dict):
+                return False
+            for key in ("path", "Path", "file_path", "TargetFile", "DirectoryPath"):
+                val = args.get(key)
+                if isinstance(val, str) and val.strip():
+                    candidate = (ws_root / val).resolve()
+                    if not candidate.is_relative_to(ws_root):
+                        return True
+            return False
+
+        file_containment_guards = [
+            policy.deny(
+                t.value,
+                when=_is_outside_workspace,
+                name="enforce_workspace_boundary",
+                reason="Path outside configured workspace is strictly denied.",
+            )
+            for t in BuiltinTools.file_tools()
+        ]
+        forbidden_cmd_guard = policy.deny(
+            BuiltinTools.RUN_COMMAND.value,
+            when=lambda args: is_forbidden_command(str(args)),
+            name="block_forbidden_command",
+            reason="Forbidden destructive command blocked by security policy.",
+        )
+
         if permission_mode == PermissionMode.READ_ONLY:
             ro_tools = BuiltinTools.read_only()
             return LocalAgentConfig(
@@ -49,6 +78,7 @@ class SDKAdapter(AgentAdapter):
                 workspaces=[workspace],
                 capabilities=CapabilitiesConfig(enabled_tools=ro_tools),
                 policies=[
+                    *file_containment_guards,
                     policy.deny_all(),
                     *[policy.allow(t.value) for t in ro_tools],
                 ],
@@ -60,8 +90,10 @@ class SDKAdapter(AgentAdapter):
                 workspaces=[workspace],
                 capabilities=CapabilitiesConfig(),
                 policies=[
-                    *policy.workspace_only([workspace]),
+                    *file_containment_guards,
+                    forbidden_cmd_guard,
                     *policy.safe_defaults(handler=ask_user_handler),
+                    *policy.workspace_only([workspace]),
                 ],
             )
 
@@ -71,8 +103,10 @@ class SDKAdapter(AgentAdapter):
             workspaces=[workspace],
             capabilities=CapabilitiesConfig(),
             policies=[
-                *policy.workspace_only([workspace]),
+                *file_containment_guards,
+                forbidden_cmd_guard,
                 policy.allow_all(),
+                *policy.workspace_only([workspace]),
             ],
         )
 

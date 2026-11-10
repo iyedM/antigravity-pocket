@@ -32,7 +32,9 @@ MAX_BUNDLE_MEMBERS = 10
 
 
 class RateLimiter:
-    """In-memory sliding window rate limiter against brute-force authentication."""
+    """Bounded sliding-window rate limiter against brute-force authentication."""
+
+    MAX_TRACKED_CLIENTS = 4096
 
     def __init__(self, max_failures: int = 10, window_seconds: int = 60) -> None:
         self.max_failures = max_failures
@@ -43,10 +45,19 @@ class RateLimiter:
         now = time.time()
         window_start = now - self.window_seconds
         attempts = [t for t in self._failures.get(client_id, []) if t >= window_start]
-        self._failures[client_id] = attempts
+        if attempts:
+            self._failures[client_id] = attempts
+        else:
+            self._failures.pop(client_id, None)
         return len(attempts) < self.max_failures
 
     def record_failure(self, client_id: str) -> None:
+        if (
+            client_id not in self._failures
+            and len(self._failures) >= self.MAX_TRACKED_CLIENTS
+        ):
+            oldest_key = next(iter(self._failures))
+            self._failures.pop(oldest_key, None)
         self._failures.setdefault(client_id, []).append(time.time())
 
     def reset(self, client_id: str) -> None:
@@ -95,9 +106,11 @@ class PersistentRevocationStore:
 
 class EphemeralTicketStore:
     """
-    Single-use, short-lived (30s) ticket store for WebSocket handshakes
+    Bounded, single-use, short-lived (30s) ticket store for WebSocket handshakes
     and file downloads so Bearer tokens are never exposed in URL query strings.
     """
+
+    MAX_ACTIVE_TICKETS = 256
 
     def __init__(self) -> None:
         self._tickets: dict[str, dict] = {}
@@ -107,10 +120,12 @@ class EphemeralTicketStore:
         now = time.time()
         ticket = f"tkt_{secrets.token_urlsafe(24)}"
         with self._lock:
-            # Purge expired tickets
             expired = [k for k, v in self._tickets.items() if v["exp"] < now]
             for k in expired:
                 self._tickets.pop(k, None)
+            while len(self._tickets) >= self.MAX_ACTIVE_TICKETS:
+                oldest = next(iter(self._tickets))
+                self._tickets.pop(oldest, None)
             self._tickets[ticket] = {"purpose": purpose, "exp": now + ttl_seconds}
         return ticket
 
@@ -231,11 +246,10 @@ def require_auth(
     request: Request,
     authorization: str | None = Header(default=None),
     x_auth_token: str | None = Header(default=None),
-    ticket: str | None = Query(default=None),
 ) -> None:
     """
-    FastAPI dependency enforcing fail-closed header authentication (or single-use ticket
-    for downloads) and brute-force rate limiting. Never accepts raw tokens in URL query strings.
+    FastAPI dependency enforcing fail-closed HTTP header authentication
+    and brute-force rate limiting. Never accepts tokens or tickets in query strings.
     """
     settings = get_settings()
     if not settings.is_password_configured_and_strong():
@@ -251,10 +265,6 @@ def require_auth(
             detail="Trop de tentatives d'authentification échouées. Réessayez dans 1 minute.",
         )
 
-    if ticket and ticket_store.consume_ticket(ticket):
-        rate_limiter.reset(client_ip)
-        return
-
     extracted = extract_request_token(authorization, x_auth_token)
     if not verify_signed_token(extracted):
         rate_limiter.record_failure(client_ip)
@@ -262,6 +272,37 @@ def require_auth(
             status_code=401, detail="Non autorisé : jeton invalide ou révoqué."
         )
 
+    rate_limiter.reset(client_ip)
+
+
+def require_download_auth(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_auth_token: str | None = Header(default=None),
+    ticket: str | None = Query(default=None),
+) -> None:
+    """
+    Authentication dependency exclusively for file downloads:
+    accepts either a single-use ticket with `purpose == 'download'` or Bearer header.
+    """
+    settings = get_settings()
+    if not settings.is_password_configured_and_strong():
+        raise HTTPException(status_code=503, detail="Serveur verrouillé.")
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limiter.check_allowed(client_ip):
+        raise HTTPException(status_code=429, detail="Trop de tentatives.")
+
+    if ticket and ticket_store.consume_ticket(ticket, expected_purpose="download"):
+        rate_limiter.reset(client_ip)
+        return
+
+    extracted = extract_request_token(authorization, x_auth_token)
+    if not verify_signed_token(extracted):
+        rate_limiter.record_failure(client_ip)
+        raise HTTPException(
+            status_code=401, detail="Non autorisé : ticket de téléchargement invalide."
+        )
     rate_limiter.reset(client_ip)
 
 
