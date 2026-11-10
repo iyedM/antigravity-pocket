@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.secret.txt
+.agy_auth_bundle.secret.txt
+workspace/
