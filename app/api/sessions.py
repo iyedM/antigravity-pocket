@@ -19,6 +19,7 @@ class UpdateSessionRequest(BaseModel):
 
 class ResolveApprovalRequest(BaseModel):
     approved: bool
+    session_id: str | None = None
 
 
 @router.get("/sessions")
@@ -119,7 +120,38 @@ async def resolve_approval(
     payload: ResolveApprovalRequest,
     _: None = Depends(require_auth),
 ) -> dict:
-    req = approval_manager.resolve(approval_id, approved=payload.approved)
+    try:
+        req = approval_manager.resolve(
+            approval_id,
+            approved=payload.approved,
+            expected_session_id=payload.session_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     if not req:
-        raise HTTPException(status_code=404, detail="Demande d'approbation introuvable.")
+        raise HTTPException(
+            status_code=404, detail="Demande d'approbation introuvable ou déjà résolue."
+        )
+    return {"approval": req.to_dict()}
+
+
+@router.post("/sessions/{session_id}/approvals/{approval_id}/resolve")
+async def resolve_session_approval(
+    session_id: str,
+    approval_id: str,
+    payload: ResolveApprovalRequest,
+    _: None = Depends(require_auth),
+) -> dict:
+    try:
+        req = approval_manager.resolve(
+            approval_id,
+            approved=payload.approved,
+            expected_session_id=session_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not req:
+        raise HTTPException(
+            status_code=404, detail="Demande d'approbation introuvable ou déjà résolue."
+        )
     return {"approval": req.to_dict()}

@@ -713,3 +713,229 @@ def test_websocket_bounded_queue_backpressure_and_reconnection_catchup(
         replay_seqs = [int(ws2.receive_json()["sequence"]) for _ in range(50)]
         assert replay_seqs == list(range(251, 301))
 
+
+def test_cross_session_approval_resolution_blocked_rest_and_ws(
+    tmp_path: Path,
+) -> None:
+    """Verify Session B cannot resolve an approval_id belonging to Session A via REST or WS."""
+    client, token = _setup_audit_env(tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    sid_a = client.post(
+        "/api/v1/sessions", json={"title": "Session-A"}, headers=headers
+    ).json()["session"]["session_id"]
+    sid_b = client.post(
+        "/api/v1/sessions", json={"title": "Session-B"}, headers=headers
+    ).json()["session"]["session_id"]
+
+    req = approval_manager.create_request(
+        session_id=sid_a,
+        tool_name="run_command",
+        command_or_target="pytest",
+        workspace=str(tmp_path),
+        risk_description="Test cross-session ownership",
+    )
+
+    # 1. Attempt to resolve Session A's approval via Session B's scoped REST route -> 403 Forbidden
+    res_wrong_scoped = client.post(
+        f"/api/v1/sessions/{sid_b}/approvals/{req.approval_id}/resolve",
+        json={"approved": True},
+        headers=headers,
+    )
+    assert res_wrong_scoped.status_code == 403
+    assert req.status == "pending"
+
+    # 2. Attempt to resolve via generic route passing Session B's ID -> 403 Forbidden
+    res_wrong_body = client.post(
+        f"/api/v1/approvals/{req.approval_id}/resolve",
+        json={"approved": True, "session_id": sid_b},
+        headers=headers,
+    )
+    assert res_wrong_body.status_code == 403
+    assert req.status == "pending"
+
+    # 3. Attempt to resolve Session A's approval from Session B's WebSocket -> session_error & still pending
+    tkt_b = client.post(
+        "/api/v1/auth/ticket", json={"purpose": "ws"}, headers=headers
+    ).json()["ticket"]
+    with client.websocket_connect(f"/ws/sessions/{sid_b}?ticket={tkt_b}") as ws_b:
+        ws_b.send_json(
+            {
+                "type": "approval",
+                "approval_id": req.approval_id,
+                "approved": True,
+            }
+        )
+        err_msg = ws_b.receive_json()
+        assert err_msg["type"] == "session_error"
+        assert req.status == "pending"
+
+    # 4. Resolve properly via Session A's scoped endpoint -> 200 OK
+    res_ok = client.post(
+        f"/api/v1/sessions/{sid_a}/approvals/{req.approval_id}/resolve",
+        json={"approved": True},
+        headers=headers,
+    )
+    assert res_ok.status_code == 200
+    assert req.status == "approved"
+
+    # 5. Replay/double-resolution attempt to flip decision -> 404 (already resolved)
+    res_replay = client.post(
+        f"/api/v1/sessions/{sid_a}/approvals/{req.approval_id}/resolve",
+        json={"approved": False},
+        headers=headers,
+    )
+    assert res_replay.status_code == 404
+    assert req.status == "approved"
+
+
+def test_all_sdk_file_tools_schemas_symlinks_and_malformed_args(
+    tmp_path: Path,
+) -> None:
+    """
+    Verify every SDK file tool (view_file, create_file, edit_file, list_directory,
+    search_directory, find_file, write_file, delete_file) against valid schemas,
+    indirect symlinks, unknown argument keys, and malformed inputs, plus OS exebox config.
+    """
+    from google.antigravity import types
+    from google.antigravity.hooks import policy
+
+    async def _run() -> None:
+        ws = tmp_path / "ws_strict"
+        ws.mkdir(parents=True, exist_ok=True)
+        outside_target = tmp_path / "host_secret.txt"
+        outside_target.write_text("secret", encoding="utf-8")
+
+        # Create an indirect symlink inside the workspace pointing outside the workspace
+        evil_symlink = ws / "indirect_escape.txt"
+        evil_symlink.symlink_to(outside_target)
+
+        cfg = SDKAdapter.build_real_sdk_config(
+            workspace=str(ws),
+            permission_mode=PermissionMode.AUTONOMOUS,
+            system_instructions="Strict Schema Audit",
+            ask_user_handler=lambda *_a, **_kw: True,
+        )
+
+        # Verify OS-level exebox sandbox is enabled on RunCommandConfig
+        assert cfg.capabilities.run_command_config is not None
+        assert cfg.capabilities.run_command_config.enable_sandbox is True
+        assert cfg.capabilities.run_command_config.enable_daemons is False
+
+        hook = policy.enforce(cfg.policies)
+
+        tool_valid_args = [
+            ("view_file", {"Path": str(ws / "a.py")}),
+            ("create_file", {"Path": str(ws / "b.py")}),
+            ("edit_file", {"TargetFile": str(ws / "c.py")}),
+            ("list_directory", {"DirectoryPath": str(ws)}),
+            ("search_directory", {"SearchDirectory": str(ws)}),
+            ("find_file", {"SearchPath": str(ws)}),
+            ("write_file", {"file_path": str(ws / "d.py")}),
+            ("delete_file", {"path": str(ws / "e.py")}),
+        ]
+
+        for tool_name, valid_args in tool_valid_args:
+            # 1. Valid in-workspace argument -> Allowed
+            res_ok = await hook.run(
+                None, types.ToolCall(id="ok", name=tool_name, args=valid_args)
+            )
+            assert res_ok.allow is True, f"{tool_name} should allow {valid_args}"
+
+            # 2. Indirect symlink escaping workspace -> Denied
+            key_name = next(iter(valid_args.keys()))
+            res_sym = await hook.run(
+                None,
+                types.ToolCall(
+                    id="sym", name=tool_name, args={key_name: str(evil_symlink)}
+                ),
+            )
+            assert res_sym.allow is False, f"{tool_name} must block symlink escape"
+
+            # 3. Unknown / unmapped parameter name -> Denied (Fail-closed)
+            res_unknown = await hook.run(
+                None,
+                types.ToolCall(
+                    id="unk",
+                    name=tool_name,
+                    args={"unexpected_param_name": str(ws / "a.py")},
+                ),
+            )
+            assert res_unknown.allow is False, f"{tool_name} must fail closed on unknown schema"
+
+            # 4. Empty dict or null-byte injection -> Denied
+            res_empty = await hook.run(
+                None, types.ToolCall(id="emp", name=tool_name, args={})
+            )
+            assert res_empty.allow is False
+
+            res_null = await hook.run(
+                None,
+                types.ToolCall(
+                    id="nul",
+                    name=tool_name,
+                    args={key_name: f"{ws}/a.py\x00/etc/passwd"},
+                ),
+            )
+            assert res_null.allow is False
+
+    asyncio.run(_run())
+
+
+def test_multi_client_ws_repeated_disconnects_and_concurrent_bursts(
+    tmp_path: Path,
+) -> None:
+    """Test 2 concurrent WS clients with repeated mid-stream disconnects and reconnections."""
+    client, token = _setup_audit_env(tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    sid = client.post(
+        "/api/v1/sessions", json={"title": "MultiClientWS"}, headers=headers
+    ).json()["session"]["session_id"]
+    runtime: AgentRuntimeManager = client.app.state.runtime_manager  # type: ignore[attr-defined]
+
+    def _new_ws_ticket() -> str:
+        return client.post(
+            "/api/v1/auth/ticket", json={"purpose": "ws"}, headers=headers
+        ).json()["ticket"]
+
+    async def _emit_range(start: int, end: int) -> None:
+        for i in range(start, end + 1):
+            await runtime.emit_event(
+                sid, EventType.ASSISTANT_MESSAGE, {"delta": f"part-{i}"}
+            )
+
+    client_stay_seqs: list[int] = []
+    client_roam_seqs: list[int] = []
+
+    with client.websocket_connect(
+        f"/ws/sessions/{sid}?ticket={_new_ws_ticket()}&last_seq=0"
+    ) as ws_stay:
+        # Phase 1: Both clients connected for events 1..40
+        with client.websocket_connect(
+            f"/ws/sessions/{sid}?ticket={_new_ws_ticket()}&last_seq=0"
+        ) as ws_roam_1:
+            asyncio.run(_emit_range(1, 40))
+            for _ in range(40):
+                client_stay_seqs.append(int(ws_stay.receive_json()["sequence"]))
+                client_roam_seqs.append(int(ws_roam_1.receive_json()["sequence"]))
+
+        # Phase 2: ws_roam is disconnected while events 41..90 are emitted
+        asyncio.run(_emit_range(41, 90))
+        for _ in range(50):
+            client_stay_seqs.append(int(ws_stay.receive_json()["sequence"]))
+
+        # Phase 3: ws_roam reconnects at last_seq=40, receives 41..90, and live 91..120
+        with client.websocket_connect(
+            f"/ws/sessions/{sid}?ticket={_new_ws_ticket()}&last_seq=40"
+        ) as ws_roam_2:
+            asyncio.run(_emit_range(91, 120))
+            for _ in range(30):
+                client_stay_seqs.append(int(ws_stay.receive_json()["sequence"]))
+            for _ in range(80):
+                client_roam_seqs.append(int(ws_roam_2.receive_json()["sequence"]))
+
+    assert client_stay_seqs == list(range(1, 121))
+    assert client_roam_seqs == list(range(1, 121))
+
+

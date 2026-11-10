@@ -459,10 +459,10 @@
         btnRow.style.marginTop = "8px";
 
         const approveBtn = el("button", "btn success", "✅ Approuver");
-        approveBtn.addEventListener("click", () => resolveApproval(p.approval_id, true));
+        approveBtn.addEventListener("click", () => resolveApproval(p.approval_id, true, p.session_id));
 
         const rejectBtn = el("button", "btn danger", "❌ Refuser");
-        rejectBtn.addEventListener("click", () => resolveApproval(p.approval_id, false));
+        rejectBtn.addEventListener("click", () => resolveApproval(p.approval_id, false, p.session_id));
 
         btnRow.appendChild(approveBtn);
         btnRow.appendChild(rejectBtn);
@@ -499,11 +499,12 @@
       input.value = "";
     }
 
-    async function resolveApproval(approvalId, approved) {
+    async function resolveApproval(approvalId, approved, sessionId) {
+      const targetSession = sessionId || currentSessionId;
       await fetch(`/api/v1/approvals/${encodeURIComponent(approvalId)}/resolve`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ approved })
+        body: JSON.stringify({ approved, session_id: targetSession })
       });
       loadApprovals();
     }
@@ -660,9 +661,9 @@
           actions.style.display = "flex";
           actions.style.gap = "6px";
           const okBtn = el("button", "btn success", "✅");
-          okBtn.addEventListener("click", () => resolveApproval(a.approval_id, true));
+          okBtn.addEventListener("click", () => resolveApproval(a.approval_id, true, a.session_id));
           const noBtn = el("button", "btn danger", "❌");
-          noBtn.addEventListener("click", () => resolveApproval(a.approval_id, false));
+          noBtn.addEventListener("click", () => resolveApproval(a.approval_id, false, a.session_id));
           actions.appendChild(okBtn);
           actions.appendChild(noBtn);
           row.appendChild(actions);

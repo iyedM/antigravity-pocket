@@ -28,9 +28,10 @@
 
 | Mécanisme | Comportement garanti dans v2.2.0 |
 | :--- | :--- |
-| **Mode `read_only` (SDK)** | Restreint `enabled_tools` à `BuiltinTools.read_only()` et applique `policy.deny_all()` + liste blanche lecture + confinement `enforce_workspace_boundary`. |
-| **Mode `assisted` (SDK)** | Validation préalable du tour + interception outil par outil via `policy.safe_defaults(handler=...)` et `enforce_workspace_boundary`. |
-| **Mode `autonomous` *(Risque élevé)*** | Confinement des outils fichiers au workspace (`enforce_workspace_boundary` + `policy.workspace_only`) et filtrage `shlex`/regex des commandes. **Attention** : le filtrage lexical ne remplace pas un bac à sable OS (n'utilisez `autonomous` que dans un conteneur Docker isolé ou avec `agy --sandbox`). |
+| **Mode `read_only` (SDK)** | Restreint `enabled_tools` à `BuiltinTools.read_only()` et applique `policy.deny_all()` + liste blanche lecture + confinement fail-closed `enforce_workspace_boundary`. |
+| **Mode `assisted` (SDK)** | Validation préalable du tour + interception outil par outil via `policy.safe_defaults(handler=...)`, confinement fail-closed sur les 8 outils fichiers (liens symboliques indirects et schémas inconnus bloqués) et sandbox OS `RunCommandConfig(enable_sandbox=True)`. |
+| **Mode `autonomous` *(Risque élevé)*** | Active le sandbox OS du SDK `RunCommandConfig(enable_sandbox=True, enable_daemons=False, timeout_seconds=120.0)`, le confinement fail-closed des outils fichiers et le filtrage `shlex`/regex. **Attention** : n'utilisez `autonomous` que dans un environnement supportant `exebox`, Docker ou `agy --sandbox`. |
+| **Isolation des Approbations (`approval_id`)** | Chaque `approval_id` est lié cryptographiquement à son `session_id` (`expected_session_id` vérifié en REST `403 Forbidden` et en WebSocket, avec rejet de toute double résolution). |
 | **Mode `assisted` (CLI `agy`)** | Validation préalable avant le lancement du sous-processus `agy --sandbox --mode accept-edits` (le CLI en mode `--print` ne supporte pas l'interception interactive outil par outil). |
 | **Séparation Mot de Passe / Jetons API** | `APP_PASSWORD` est accepté **uniquement** sur `POST /api/v1/auth/login`. Toutes les routes API exigent un jeton HMAC-SHA256 signé non révoqué. |
 | **Authentification WebSocket / Download** | Ticket éphémère à usage unique (`tkt_...`, validité 30s) isolé par finalité (`ws` vs `download`), aucun jeton Bearer dans les query parameters. |

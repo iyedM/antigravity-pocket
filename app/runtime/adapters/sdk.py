@@ -39,25 +39,68 @@ class SDKAdapter(AgentAdapter):
             BuiltinTools,
             CapabilitiesConfig,
             LocalAgentConfig,
+            types,
         )
         from google.antigravity.hooks import policy
 
         ws_root = Path(workspace).resolve()
+        known_path_keys = (
+            "path",
+            "Path",
+            "file_path",
+            "TargetFile",
+            "DirectoryPath",
+            "SearchPath",
+            "SearchDirectory",
+            "Directory",
+            "File",
+            "Source",
+            "Destination",
+        )
 
-        def _is_outside_workspace(args: dict[str, Any]) -> bool:
+        def _check_path_invalid(raw_path: str) -> bool:
+            if not raw_path or not raw_path.strip() or "\x00" in raw_path:
+                return True
+            try:
+                candidate = (ws_root / raw_path).resolve()
+                return not candidate.is_relative_to(ws_root)
+            except (OSError, ValueError):
+                return True
+
+        def _is_outside_workspace_file_tool(args: dict[str, Any]) -> bool:
+            """
+            Fail-closed validator for filesystem tools:
+            - Denies if `args` is not a non-empty dict or contains no recognized path argument.
+            - Denies if any recognized path argument or path-like string resolves outside `ws_root`
+              (including indirect symlink escapes or `..` traversal).
+            """
+            if not isinstance(args, dict) or not args:
+                return True
+            found_valid_key = False
+            for key in known_path_keys:
+                if key in args:
+                    val = args[key]
+                    if not isinstance(val, str) or _check_path_invalid(val):
+                        return True
+                    found_valid_key = True
+            return not found_valid_key
+
+        def _is_outside_workspace_any_tool(args: dict[str, Any]) -> bool:
             if not isinstance(args, dict):
                 return False
-            for key in ("path", "Path", "file_path", "TargetFile", "DirectoryPath"):
-                val = args.get(key)
-                if isinstance(val, str) and val.strip():
-                    candidate = (ws_root / val).resolve()
-                    if not candidate.is_relative_to(ws_root):
+            for key in known_path_keys:
+                if key in args:
+                    val = args[key]
+                    if not isinstance(val, str) or _check_path_invalid(val):
                         return True
             return False
 
         guarded_file_tools = sorted(
             {
                 *(t.value for t in BuiltinTools.file_tools()),
+                "list_directory",
+                "search_directory",
+                "find_file",
                 "write_file",
                 "create_file",
                 "delete_file",
@@ -67,15 +110,15 @@ class SDKAdapter(AgentAdapter):
             *(
                 policy.deny(
                     tool_name,
-                    when=_is_outside_workspace,
+                    when=_is_outside_workspace_file_tool,
                     name="enforce_workspace_boundary",
-                    reason="Path outside configured workspace is strictly denied.",
+                    reason="Path outside configured workspace or malformed file arguments denied.",
                 )
                 for tool_name in guarded_file_tools
             ),
             policy.deny(
                 "*",
-                when=_is_outside_workspace,
+                when=_is_outside_workspace_any_tool,
                 name="enforce_workspace_boundary_wildcard",
                 reason="Path outside configured workspace is strictly denied.",
             ),
@@ -85,6 +128,11 @@ class SDKAdapter(AgentAdapter):
             when=lambda args: is_forbidden_command(str(args), workspace=workspace),
             name="block_forbidden_command",
             reason="Forbidden destructive or out-of-workspace command blocked by policy.",
+        )
+        sandboxed_cmd_config = types.RunCommandConfig(
+            enable_sandbox=True,
+            enable_daemons=False,
+            timeout_seconds=120.0,
         )
 
         if permission_mode == PermissionMode.READ_ONLY:
@@ -104,7 +152,9 @@ class SDKAdapter(AgentAdapter):
             return LocalAgentConfig(
                 system_instructions=system_instructions,
                 workspaces=[workspace],
-                capabilities=CapabilitiesConfig(),
+                capabilities=CapabilitiesConfig(
+                    run_command_config=sandboxed_cmd_config
+                ),
                 policies=[
                     *file_containment_guards,
                     forbidden_cmd_guard,
@@ -113,11 +163,13 @@ class SDKAdapter(AgentAdapter):
                 ],
             )
 
-        # PermissionMode.AUTONOMOUS (confined to workspace for file operations)
+        # PermissionMode.AUTONOMOUS (OS exebox sandbox enabled + workspace containment)
         return LocalAgentConfig(
             system_instructions=system_instructions,
             workspaces=[workspace],
-            capabilities=CapabilitiesConfig(),
+            capabilities=CapabilitiesConfig(
+                run_command_config=sandboxed_cmd_config
+            ),
             policies=[
                 *file_containment_guards,
                 forbidden_cmd_guard,

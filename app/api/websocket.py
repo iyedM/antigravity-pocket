@@ -120,7 +120,28 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                 elif msg_type == "approval":
                     approval_id = str(data.get("approval_id", ""))
                     approved = bool(data.get("approved", False))
-                    approval_manager.resolve(approval_id, approved=approved)
+                    try:
+                        resolved = approval_manager.resolve(
+                            approval_id,
+                            approved=approved,
+                            expected_session_id=session_id,
+                        )
+                        if resolved is None:
+                            await websocket.send_json(
+                                {
+                                    "type": "session_error",
+                                    "payload": {
+                                        "error": "Approbation introuvable ou déjà résolue."
+                                    },
+                                }
+                            )
+                    except PermissionError as exc:
+                        await websocket.send_json(
+                            {
+                                "type": "session_error",
+                                "payload": {"error": str(exc)},
+                            }
+                        )
         finally:
             sender_task.cancel()
             await asyncio.gather(sender_task, return_exceptions=True)

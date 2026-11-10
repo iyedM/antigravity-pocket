@@ -161,9 +161,20 @@ class ApprovalManager:
         self._pending[req.approval_id] = req
         return req
 
-    def resolve(self, approval_id: str, approved: bool) -> ApprovalRequest | None:
+    def resolve(
+        self,
+        approval_id: str,
+        approved: bool,
+        expected_session_id: str | None = None,
+    ) -> ApprovalRequest | None:
         req = self._pending.get(approval_id)
         if not req:
+            return None
+        if expected_session_id is not None and req.session_id != expected_session_id:
+            raise PermissionError(
+                f"Accès refusé : l'approbation {approval_id} appartient à une autre session."
+            )
+        if req.status != "pending":
             return None
         req.status = "approved" if approved else "rejected"
         req.resolved_at = datetime.now(UTC).isoformat()
