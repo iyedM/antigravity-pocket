@@ -3,15 +3,16 @@ services:
     build: .
     container_name: antigravity-pocket
     restart: unless-stopped
+    # Par défaut, écoute uniquement sur l'interface locale (127.0.0.1).
+    # Utilisez un tunnel sécurisé (Tailscale / Cloudflare Tunnel / Reverse Proxy TLS) pour l'accès distant.
     ports:
-      - "7860:7860"
+      - "127.0.0.1:7860:7860"
     environment:
-      - APP_PASSWORD=${APP_PASSWORD:-ChangeMeNow!}
-      - APP_SECRET_KEY=${APP_SECRET_KEY:-replace_with_random_64_hex_secret}
+      - APP_PASSWORD=${APP_PASSWORD:?Erreur: definissez APP_PASSWORD (min 8 caracteres) dans votre fichier .env}
+      - APP_SECRET_KEY=${APP_SECRET_KEY:?Erreur: definissez APP_SECRET_KEY (64 hex) dans votre fichier .env}
       - AGY_WORKSPACE=/home/user/workspace
       - AGY_DB_PATH=/home/user/data/antigravity_pocket.db
       - AGY_DEFAULT_PERMISSION_MODE=${AGY_DEFAULT_PERMISSION_MODE:-assisted}
     volumes:
       - ./workspace:/home/user/workspace
       - ./data:/home/user/data
-      - ~/.gemini:/home/user/.gemini

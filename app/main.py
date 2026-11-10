@@ -1,6 +1,4 @@
-import io
 import os
-import tarfile
 from pathlib import Path
 from typing import Optional
 
@@ -10,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import auth, files, sessions, websocket
 from app.core.config import Settings, get_settings
-from app.core.security import decrypt_bundle_aes_gcm
+from app.core.security import decrypt_bundle_aes_gcm, safe_extract_tar_bundle
 from app.runtime.manager import AgentRuntimeManager
 from app.services.session_service import SessionService
 from app.services.workspace_service import WorkspaceService
@@ -18,10 +16,10 @@ from app.services.workspace_service import WorkspaceService
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def restore_encrypted_bundle_if_present() -> None:
+def restore_encrypted_bundle_if_present(dest_root: Optional[Path] = None) -> None:
     """
-    Optional Phase 2 Cloud helper: restores an AES-256-GCM encrypted bundle
-    only when both AGY_ENCRYPTED_BUNDLE and AGY_BUNDLE_PASSPHRASE are set.
+    Optional Cloud helper: decrypts and safely extracts an AES-256-GCM bundle
+    using strict allowlist validation (`safe_extract_tar_bundle`).
     """
     enc_bundle = os.environ.get("AGY_ENCRYPTED_BUNDLE", "").strip()
     passphrase = os.environ.get("AGY_BUNDLE_PASSPHRASE", "").strip()
@@ -29,10 +27,9 @@ def restore_encrypted_bundle_if_present() -> None:
         return
     try:
         raw_tar = decrypt_bundle_aes_gcm(enc_bundle, passphrase)
-        with tarfile.open(fileobj=io.BytesIO(raw_tar), mode="r:gz") as tar:
-            tar.extractall(path=Path.home())
+        safe_extract_tar_bundle(raw_tar, dest_root or Path.home())
     except Exception as exc:
-        print(f"[Antigravity Pocket] Échec du déchiffrement AES-256-GCM : {exc}")
+        print(f"[Antigravity Pocket] Échec de restauration sécurisée : {exc}")
 
 
 def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
@@ -50,6 +47,7 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     workspace_service = WorkspaceService(
         workspace_root=settings.workspace_dir,
         max_upload_bytes=settings.max_upload_bytes,
+        max_workspace_bytes=settings.max_workspace_bytes,
     )
     runtime_manager = AgentRuntimeManager(session_service=session_service)
 

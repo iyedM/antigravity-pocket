@@ -1,13 +1,16 @@
 import shutil
 from pathlib import Path
+from typing import Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from app.core.config import get_settings
 from app.core.security import (
     create_signed_token,
+    extract_request_token,
     rate_limiter,
     require_auth,
+    revoke_signed_token,
     verify_password_constant_time,
 )
 from app.services.notification_service import notification_service
@@ -22,15 +25,21 @@ class LoginRequest(BaseModel):
 @router.post("/login")
 async def login(payload: LoginRequest, request: Request) -> dict:
     settings = get_settings()
-    client_ip = request.client.host if request.client else "unknown"
+    if not settings.is_password_configured_and_strong():
+        if not settings.allow_unauthenticated_local:
+            raise HTTPException(
+                status_code=503,
+                detail="Serveur verrouillé : APP_PASSWORD (min 8 caractères) doit être configuré.",
+            )
 
+    client_ip = request.client.host if request.client else "unknown"
     if not rate_limiter.check_allowed(client_ip):
         raise HTTPException(
             status_code=429,
             detail="Trop de tentatives échouées. Réessayez dans 60 secondes.",
         )
 
-    if settings.app_password and not verify_password_constant_time(
+    if settings.is_password_configured_and_strong() and not verify_password_constant_time(
         payload.password, settings.app_password
     ):
         rate_limiter.record_failure(client_ip)
@@ -43,6 +52,18 @@ async def login(payload: LoginRequest, request: Request) -> dict:
         "token": token,
         "expires_in": settings.token_ttl_seconds,
     }
+
+
+@router.post("/logout")
+async def logout(
+    authorization: Optional[str] = Header(default=None),
+    x_auth_token: Optional[str] = Header(default=None),
+    token: Optional[str] = Query(default=None),
+    _: None = Depends(require_auth),
+) -> dict:
+    raw_token = extract_request_token(authorization, x_auth_token, token)
+    revoked = revoke_signed_token(raw_token)
+    return {"ok": True, "revoked": revoked}
 
 
 @router.get("/status")
@@ -63,6 +84,6 @@ async def system_status(_: None = Depends(require_auth)) -> dict:
         "cli_available": shutil.which("agy") is not None,
         "account_configured": (Path.home() / ".gemini").exists(),
         "workspace": str(settings.workspace_dir),
-        "auth_protected": bool(settings.app_password),
+        "auth_protected": settings.is_password_configured_and_strong(),
         "notifications": notification_service.list_recent(10),
     }

@@ -37,12 +37,18 @@ class WorkspaceService:
         self,
         workspace_root: Optional[Path] = None,
         max_upload_bytes: Optional[int] = None,
+        max_workspace_bytes: Optional[int] = None,
     ) -> None:
         settings = get_settings()
         self.root = (workspace_root or settings.workspace_dir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_upload_bytes = (
             max_upload_bytes if max_upload_bytes is not None else settings.max_upload_bytes
+        )
+        self.max_workspace_bytes = (
+            max_workspace_bytes
+            if max_workspace_bytes is not None
+            else settings.max_workspace_bytes
         )
 
     def resolve_safe_path(self, relative_path: str = "") -> Path:
