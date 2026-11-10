@@ -1,8 +1,11 @@
 import asyncio
+import re
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 
 
 class PermissionMode(str, Enum):
@@ -15,12 +18,26 @@ class PermissionMode(str, Enum):
 
 FORBIDDEN_PATTERNS = (
     "rm -rf /",
+    "rm -fr /",
+    "--no-preserve-root",
     "mkfs",
     "shutdown",
     "reboot",
     ":(){ :|:& };:",
     "dd if=",
     "> /dev/sd",
+    "> /dev/nvme",
+    "/etc/shadow",
+    "/etc/passwd",
+    "/.ssh/",
+    "~/.ssh",
+)
+
+FORBIDDEN_REGEXES = (
+    re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/(\*|\s|$)", re.IGNORECASE),
+    re.compile(r"\b(curl|wget)\b.*\|\s*(ba)?sh\b", re.IGNORECASE),
+    re.compile(r"\bchmod\s+(-r\s+)?777\s+/(\*|\s|$)", re.IGNORECASE),
+    re.compile(r"\bfind\s+/\s+.*-delete\b", re.IGNORECASE),
 )
 
 WRITE_OR_EXEC_TOOLS = {
@@ -34,9 +51,44 @@ WRITE_OR_EXEC_TOOLS = {
 }
 
 
-def is_forbidden_command(command_or_args: str) -> bool:
+def is_forbidden_command(
+    command_or_args: str, workspace: str | None = None
+) -> bool:
+    """
+    Evaluates a command or serialized tool argument string against:
+    1. Known destructive command signatures and regexes (flag permutations, pipe-to-shell).
+    2. Workspace path containment (blocks `..` traversal or absolute paths outside `workspace`).
+    """
     lowered = command_or_args.lower()
-    return any(pat in lowered for pat in FORBIDDEN_PATTERNS)
+    if any(pat in lowered for pat in FORBIDDEN_PATTERNS):
+        return True
+    if any(rx.search(lowered) for rx in FORBIDDEN_REGEXES):
+        return True
+
+    if workspace:
+        ws_root = Path(workspace).resolve()
+        try:
+            tokens = shlex.split(command_or_args, posix=True)
+        except ValueError:
+            tokens = command_or_args.split()
+
+        for tok in tokens:
+            cleaned = tok.strip("\"',;()[]{}")
+            if not cleaned or cleaned.startswith("-"):
+                continue
+            if ".." in Path(cleaned).parts:
+                candidate = (ws_root / cleaned).resolve()
+                if not candidate.is_relative_to(ws_root):
+                    return True
+            elif cleaned.startswith("/") and len(cleaned) > 1:
+                # Allow standard read-only system binary prefixes (/usr/bin, /bin, /dev/null)
+                if cleaned.startswith(("/usr/bin/", "/bin/", "/usr/local/bin/", "/dev/null")):
+                    continue
+                candidate = Path(cleaned).resolve()
+                if not candidate.is_relative_to(ws_root):
+                    return True
+
+    return False
 
 
 def classify_operation(tool_name: str, args_summary: str) -> tuple[bool, str]:

@@ -68,7 +68,7 @@ class CLIAdapter(AgentAdapter):
         permission_mode: PermissionMode,
         emit: EventEmitter,
     ) -> None:
-        if is_forbidden_command(message):
+        if is_forbidden_command(message, workspace=workspace):
             await emit(
                 EventType.SESSION_ERROR,
                 {"error": "Instruction bloquée par la politique de sécurité."},

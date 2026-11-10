@@ -9,6 +9,8 @@ from app.core.security import ticket_store, verify_signed_token
 
 router = APIRouter(tags=["websocket"])
 
+MAX_WS_QUEUE_SIZE = 256
+
 
 @router.websocket("/ws/sessions/{session_id}")
 async def session_websocket(websocket: WebSocket, session_id: str) -> None:
@@ -58,10 +60,15 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=1008)
         return
 
-    live_queue: asyncio.Queue[dict] = asyncio.Queue()
+    live_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_WS_QUEUE_SIZE)
 
     async def _on_live_event(envelope: EventEnvelope) -> None:
-        await live_queue.put(envelope.to_dict())
+        if live_queue.full():
+            try:
+                live_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        live_queue.put_nowait(envelope.to_dict())
 
     # Step 1: Subscribe BEFORE fetching replay events so zero events can fall in a gap
     runtime.subscribe(session_id, _on_live_event)
@@ -77,12 +84,22 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                 high_water_seq = seq
 
         # Step 3: Background task forwarding live events with sequence deduplication
+        # and automatic SQLite catch-up if bounded queue evicted old frames under backpressure
         async def _forward_live_queue() -> None:
             nonlocal high_water_seq
             while True:
                 ev = await live_queue.get()
                 seq = int(ev.get("sequence", 0))
-                if seq > high_water_seq:
+                if seq > high_water_seq + 1:
+                    catchup = runtime.session_service.get_events_since(
+                        session_id, high_water_seq
+                    )
+                    for missed in catchup:
+                        m_seq = int(missed.get("sequence", 0))
+                        if m_seq > high_water_seq:
+                            high_water_seq = m_seq
+                            await websocket.send_json(missed)
+                elif seq > high_water_seq:
                     high_water_seq = seq
                     await websocket.send_json(ev)
 

@@ -94,7 +94,16 @@ class AgentRuntimeManager:
                         session_id=session_id,
                     )
                 elif ev_type == EventType.APPROVAL_RESOLVED:
-                    self.session_service.update_session_status(session_id, "running")
+                    next_status = "running" if data.get("approved", True) else "rejected"
+                    self.session_service.update_session_status(session_id, next_status)
+                elif ev_type == EventType.SESSION_ERROR:
+                    self.session_service.update_session_status(session_id, "error")
+                    notification_service.push(
+                        title="Erreur ou refus de session",
+                        body=str(data.get("error", "Exécution interrompue.")),
+                        level="error",
+                        session_id=session_id,
+                    )
                 await self.emit_event(session_id, ev_type, data)
 
             try:
@@ -109,7 +118,7 @@ class AgentRuntimeManager:
                     emit=_adapter_emit,
                 )
                 current = self.session_service.get_session(session_id)
-                if current and current["status"] != "error":
+                if current and current["status"] not in ("error", "rejected", "cancelled"):
                     self.session_service.update_session_status(session_id, "completed")
                     await self.emit_event(
                         session_id,

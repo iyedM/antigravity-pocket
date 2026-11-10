@@ -55,20 +55,36 @@ class SDKAdapter(AgentAdapter):
                         return True
             return False
 
+        guarded_file_tools = sorted(
+            {
+                *(t.value for t in BuiltinTools.file_tools()),
+                "write_file",
+                "create_file",
+                "delete_file",
+            }
+        )
         file_containment_guards = [
+            *(
+                policy.deny(
+                    tool_name,
+                    when=_is_outside_workspace,
+                    name="enforce_workspace_boundary",
+                    reason="Path outside configured workspace is strictly denied.",
+                )
+                for tool_name in guarded_file_tools
+            ),
             policy.deny(
-                t.value,
+                "*",
                 when=_is_outside_workspace,
-                name="enforce_workspace_boundary",
+                name="enforce_workspace_boundary_wildcard",
                 reason="Path outside configured workspace is strictly denied.",
-            )
-            for t in BuiltinTools.file_tools()
+            ),
         ]
         forbidden_cmd_guard = policy.deny(
             BuiltinTools.RUN_COMMAND.value,
-            when=lambda args: is_forbidden_command(str(args)),
+            when=lambda args: is_forbidden_command(str(args), workspace=workspace),
             name="block_forbidden_command",
-            reason="Forbidden destructive command blocked by security policy.",
+            reason="Forbidden destructive or out-of-workspace command blocked by policy.",
         )
 
         if permission_mode == PermissionMode.READ_ONLY:
@@ -126,7 +142,7 @@ class SDKAdapter(AgentAdapter):
         permission_mode: PermissionMode,
         emit: EventEmitter,
     ) -> None:
-        if is_forbidden_command(message):
+        if is_forbidden_command(message, workspace=workspace):
             await emit(
                 EventType.SESSION_ERROR,
                 {"error": "Opération refusée par la politique de sécurité globale."},
@@ -191,6 +207,17 @@ class SDKAdapter(AgentAdapter):
         )
 
         async def _execute_sdk_turn() -> None:
+            from google.antigravity import Agent
+            from google.antigravity.hooks import policy
+
+            config = self.build_real_sdk_config(
+                workspace=workspace,
+                permission_mode=permission_mode,
+                system_instructions=scoped_instructions,
+                ask_user_handler=_ask_mobile_user_for_tool,
+            )
+            policy_hook = policy.enforce(config.policies)
+
             if self._sdk_factory is not None:
                 agent_cm = self._sdk_factory(
                     {
@@ -198,17 +225,11 @@ class SDKAdapter(AgentAdapter):
                         "write_enabled": permission_mode != PermissionMode.READ_ONLY,
                         "workspace": workspace,
                         "permission_mode": permission_mode.value,
+                        "sdk_config": config,
+                        "policy_hook": policy_hook,
                     }
                 )
             else:
-                from google.antigravity import Agent
-
-                config = self.build_real_sdk_config(
-                    workspace=workspace,
-                    permission_mode=permission_mode,
-                    system_instructions=scoped_instructions,
-                    ask_user_handler=_ask_mobile_user_for_tool,
-                )
                 agent_cm = Agent(config)
 
             async with agent_cm as agent:

@@ -28,11 +28,14 @@
 
 | Mécanisme | Comportement garanti dans v2.2.0 |
 | :--- | :--- |
-| **Mode `read_only` (SDK)** | Restreint `enabled_tools` à `BuiltinTools.read_only()` et applique `policy.deny_all()` + liste blanche lecture. |
-| **Mode `assisted` (SDK)** | Validation préalable du tour + interception outil par outil via `policy.safe_defaults(handler=...)` et `policy.workspace_only()`. |
+| **Mode `read_only` (SDK)** | Restreint `enabled_tools` à `BuiltinTools.read_only()` et applique `policy.deny_all()` + liste blanche lecture + confinement `enforce_workspace_boundary`. |
+| **Mode `assisted` (SDK)** | Validation préalable du tour + interception outil par outil via `policy.safe_defaults(handler=...)` et `enforce_workspace_boundary`. |
+| **Mode `autonomous` *(Risque élevé)*** | Confinement des outils fichiers au workspace (`enforce_workspace_boundary` + `policy.workspace_only`) et filtrage `shlex`/regex des commandes. **Attention** : le filtrage lexical ne remplace pas un bac à sable OS (n'utilisez `autonomous` que dans un conteneur Docker isolé ou avec `agy --sandbox`). |
 | **Mode `assisted` (CLI `agy`)** | Validation préalable avant le lancement du sous-processus `agy --sandbox --mode accept-edits` (le CLI en mode `--print` ne supporte pas l'interception interactive outil par outil). |
-| **Authentification WebSocket / Download** | Ticket éphémère à usage unique (`tkt_...`, validité 30s), aucun jeton Bearer dans les query parameters. |
-| **Révocation de session (`Logout`)** | Persistée sur disque dans la table SQLite `revoked_tokens` (survit aux redémarrages). |
+| **Séparation Mot de Passe / Jetons API** | `APP_PASSWORD` est accepté **uniquement** sur `POST /api/v1/auth/login`. Toutes les routes API exigent un jeton HMAC-SHA256 signé non révoqué. |
+| **Authentification WebSocket / Download** | Ticket éphémère à usage unique (`tkt_...`, validité 30s) isolé par finalité (`ws` vs `download`), aucun jeton Bearer dans les query parameters. |
+| **File WebSocket Bornée & Rattrapage SQLite** | File mémoire bornée (`MAX_WS_QUEUE_SIZE = 256`) avec éviction sans blocage en cas de backpressure et rattrapage automatique des séquences manquantes depuis SQLite (`last_seq`). |
+| **Modèle d'exécution Uvicorn (`--workers 1`)** | Les files pub/sub temps réel et les tickets éphémères résident en mémoire de processus : déployez toujours avec un seul worker asynchrone (`uvicorn --workers 1`). |
 
 ---
 

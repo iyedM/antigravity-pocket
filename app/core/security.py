@@ -219,16 +219,15 @@ def verify_signed_token(token: str) -> bool:
     """
     Strictly fail-closed token verification:
     - Returns False if APP_PASSWORD is not configured or weak.
-    - Accepts valid non-revoked HMAC token or constant-time APP_PASSWORD match.
+    - Accepts ONLY a valid, non-expired, non-revoked HMAC-SHA256 signed session token.
+    - Never accepts the raw master APP_PASSWORD as an API or WebSocket bearer token.
     """
     settings = get_settings()
     if not settings.is_password_configured_and_strong():
         return False
     if not token:
         return False
-    if decode_and_verify_signed_token(token) is not None:
-        return True
-    return verify_password_constant_time(token, settings.app_password)
+    return decode_and_verify_signed_token(token) is not None
 
 
 def extract_request_token(
