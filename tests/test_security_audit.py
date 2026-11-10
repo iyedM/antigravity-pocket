@@ -1166,6 +1166,8 @@ def test_mobile_frontend_javascript_syntax_and_reconnect_invariants(
     assert "?token=" not in html
 
     # Streaming, session-ownership & mobile reconnection invariants
+    assert "authToken" not in html
+    assert "getToken()" in html
     assert "wsGeneration" in html
     assert "visibilitychange" in html
     assert "last_seq=" in html

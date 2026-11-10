@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="Antigravity" />
   <meta name="theme-color" content="#0b0f19" />
   <link rel="manifest" href="/manifest.json" />
-  <title>Antigravity Pocket v2.2</title>
+  <title>Antigravity Pocket v2.3</title>
   <style>
     :root[data-theme="dark"] {
       --bg: #0b0f19;
@@ -403,7 +403,7 @@
     let reconnectAttempt = 0;
 
     async function connectWebSocket() {
-      if (!currentSessionId || !authToken) return;
+      if (!currentSessionId || !getToken()) return;
       const myGen = ++wsGeneration;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -447,7 +447,7 @@
     }
 
     function scheduleReconnect(expectedGen) {
-      if (expectedGen !== wsGeneration || !authToken || !currentSessionId) return;
+      if (expectedGen !== wsGeneration || !getToken() || !currentSessionId) return;
       const delay = Math.min(1500 * Math.pow(2, reconnectAttempt), 15000);
       reconnectAttempt += 1;
       reconnectTimer = setTimeout(() => {
@@ -456,12 +456,12 @@
     }
 
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && authToken && currentSessionId) {
+      if (document.visibilityState === "visible" && getToken() && currentSessionId) {
         if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
       }
     });
     window.addEventListener("online", () => {
-      if (authToken && currentSessionId && (!ws || ws.readyState !== WebSocket.OPEN)) {
+      if (getToken() && currentSessionId && (!ws || ws.readyState !== WebSocket.OPEN)) {
         connectWebSocket();
       }
     });
