@@ -1,10 +1,10 @@
-# Politique de Sécurité (Security Policy) — Antigravity Pocket v2.2.0
+# Politique de Sécurité (Security Policy) — Antigravity Pocket v2.3.0-rc1
 
 **Antigravity Pocket** est un compagnon mobile communautaire indépendant conçu selon une architecture **Local-First & Fail-Closed Security**.
 
 ---
 
-## 1. Garanties de Sécurité Implémentées et Testées (v2.2.0)
+## 1. Garanties de Sécurité Implémentées et Testées (v2.3.0-rc1 — 44/44 Tests Pytest)
 
 1. **Authentification Fail-Closed & Séparation des Privilèges (`app/core/security.py`, `app/core/config.py`)** :
    - Aucune option de désactivation de l'authentification n'existe dans le code : le serveur refuse toute requête (`HTTP 503`) tant que `APP_PASSWORD` (minimum 8 caractères, hors liste noire et motifs répétitifs/séquentiels) n'est pas configuré.
@@ -15,28 +15,26 @@
    - **Protection Anti-DoS par Bornage Mémoire** : `RateLimiter` (`MAX_TRACKED_CLIENTS = 4096`), `EphemeralTicketStore` (`MAX_ACTIVE_TICKETS = 256`) et les files WebSocket (`MAX_WS_QUEUE_SIZE = 256`) bornent strictement leur empreinte mémoire face aux attaques par inondation (flood) ou aux clients lents.
    - **En-têtes HTTP de Sécurité (`app/main.py`)** : Toutes les réponses HTTP incluent `Content-Security-Policy` (`default-src 'self'`, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, ainsi que `Cache-Control: no-store` sur toutes les routes `/api/`.
 
-2. **Contrôle des Permissions via `google.antigravity.hooks.policy` & Validation Préalable (`app/runtime/adapters/sdk.py`, `app/runtime/adapters/cli.py`)** :
+2. **Contrôle des Permissions, Atomicité des Approbations & Sandbox OS (`app/runtime/adapters/sdk.py`, `app/core/permissions.py`)** :
+   - **Atomicité & Isolation Inter-Sessions (`ApprovalManager`)** : Toutes les transitions d'état (`pending -> approved/rejected`) sont sérialisées par un verrou `threading.Lock` (`MAX_TRACKED_APPROVALS = 1024`), empêchant toute course critique entre requêtes concurrentes ou expiration de délai. Chaque résolution exige la correspondance stricte `expected_session_id` (`403 Forbidden` en cas de tentative inter-session, `404` sur double résolution).
    - **SDK Python (`google-antigravity` v0.1.23+)** :
-     - Prédicats dynamiques en mémoire (`enforce_workspace_boundary` sur les outils fichiers et `block_forbidden_command` avec analyse `shlex`/regex et vérification de confinement au workspace sur `run_command`) combinés aux politiques natives du SDK (`policy.workspace_only([workspace])`, `policy.safe_defaults(handler=...)`, `policy.deny_all()`).
-     - Mode `read_only` : Restreint `CapabilitiesConfig(enabled_tools=BuiltinTools.read_only())` et applique `policy.deny_all()` avec liste blanche explicite des outils de lecture.
-     - Mode `assisted` *(par défaut)* : Combine une validation préalable du tour de session et les politiques natives du SDK `policy.workspace_only([workspace])` + `policy.safe_defaults(handler=...)` (qui interceptent chaque outil d'écriture ou d'exécution via `PreToolCallDecideHook`).
-     - Mode `autonomous` *(Mode à risque élevé)* : Applique les gardes de confinement `enforce_workspace_boundary` + `block_forbidden_command` + `policy.workspace_only([workspace])` + `policy.allow_all()`. **Avertissement de sécurité** : un filtrage lexical/heuristique de commandes shell ne remplace pas une isolation système (kernel namespace/cgroups). N'activez le mode `autonomous` que lorsque le serveur tourne dans un conteneur Docker isolé ou via `agy --sandbox`.
+     - Validation fail-closed des schémas sur les 8 outils fichiers (`view_file`, `create_file`, `edit_file`, `list_directory`, `search_directory`, `find_file`, `write_file`, `delete_file`), rejetant tout champ inconnu, octet nul `\x00` ou lien symbolique indirect pointant hors du workspace.
+     - Activation explicite de `RunCommandConfig(enable_sandbox=True, enable_daemons=False, timeout_seconds=120.0)` **et vérification à l'exécution** de `agent.sandbox_status` dès l'entrée dans `async with Agent(config)` avant tout appel `agent.chat()` : si `sandbox_status.available == False` (ou si `sandbox_status` est non confirmé en mode `autonomous`), la session échoue proprement en mode fail-closed (`SESSION_ERROR`).
    - **CLI (`agy` v1.5.3+)** :
-     - Invoqué avec `--sandbox` et `--mode (plan | accept-edits | auto)`.
-     - En mode CLI `assisted`, la validation mobile agit comme une **validation préalable du lancement du tour CLI** (et non outil par outil à l'intérieur du processus CLI).
+     - Invoqué avec `--sandbox` et `--mode (plan | accept-edits | auto)`. En mode `assisted`, la validation mobile agit comme une validation préalable du lancement du tour CLI.
 
-3. **Cycle de Vie des Tâches, Remplacement & Annulation Réelle (`app/runtime/manager.py`, `app/runtime/adapters/sdk.py`)** :
-   - En cas de nouveau prompt sur une session déjà active, `start_background_turn` capture la référence exacte de `previous_task` et attend son arrêt complet avant de lancer la nouvelle tâche (évitant toute auto-annulation).
-   - Dans `SDKAdapter`, l'exécution est encapsulée dans une `asyncio.Task` dédiée (`_active_sdk_tasks`) : `cancel()` annule la tâche active et débloque immédiatement toute demande d'approbation en attente, provoquant la sortie propre du gestionnaire de contexte `async with Agent(config)`.
-   - Dans `CLIAdapter`, `os.killpg` termine l'arbre complet du groupe de processus (`start_new_session=True`), tandis que `stdout` et `stderr` sont consommés simultanément.
+3. **Cycle de Vie des Tâches, Statuts d'Erreur & Annulation Réelle (`app/runtime/manager.py`, `app/runtime/adapters/sdk.py`)** :
+   - Toute émission de `SESSION_ERROR` ou refus d'approbation marque immédiatement la session en statut non terminé (`error`/`rejected`) et empêche toute émission ultérieure de `SESSION_COMPLETED`.
+   - En cas de nouveau prompt sur une session déjà active, `start_background_turn` capture `previous_task` explicitement et attend son arrêt complet avant de lancer `new_task`.
+   - Annulation réelle de tâche dans `SDKAdapter` (`_active_sdk_tasks[session_id].cancel()`) et terminaison du groupe de processus (`os.killpg`) dans `CLIAdapter`.
 
-4. **Isolation du Workspace, Écriture Atomique & Protection TOCTOU (`app/services/workspace_service.py`)** :
-   - Résolution canonique (`is_relative_to`), rejet des liens symboliques (`is_symlink()` + `O_NOFOLLOW` à la lecture).
+4. **Isolation du Workspace sans Fenêtre TOCTOU (`openat` / `dir_fd` + `O_NOFOLLOW` dans `app/services/workspace_service.py`)** :
+   - Lecture d'aperçu (`preview_file`) et téléchargement (`open_download_stream` + `StreamingResponse`) par traversée atomique de descripteurs de répertoires (`os.open(..., dir_fd=..., flags=O_DIRECTORY | O_NOFOLLOW)`), éliminant toute fenêtre de course (TOCTOU) sur les dossiers intermédiaires comme sur le fichier cible, sans réouverture par chemin.
    - Upload en streaming par chunks (`save_upload_stream`), quotas par fichier et global, écriture atomique (`tempfile.mkstemp` + `os.replace`) et politique explicite de collision (`409 Conflict`).
 
-5. **Protection XSS Frontend & Synchronisation WebSocket Sans Perte (`app/static/index.html`, `app/api/websocket.py`)** :
-   - **Zéro `.innerHTML`** et **zéro `?token=`** dans le frontend (vérifié par test statique automatisé).
-   - **Subscribe-First Replay** : Abonnement à la file temps réel *avant* la lecture SQLite (`last_seq`), suivi d'une déduplication stricte par `sequence`.
+5. **Protection XSS Frontend & Synchronisation WebSocket Mobile (`app/static/index.html`, `app/api/websocket.py`)** :
+   - **Zéro `.innerHTML`**, **zéro `eval()`** et **zéro `?token=`** dans le frontend (vérifié par test statique et syntaxique AST `node --check`).
+   - **Subscribe-First Replay + Backpressure + Reconnexion Mobile** : File bornée (`MAX_WS_QUEUE_SIZE = 256`) avec rattrapage SQLite automatique, compteur de génération `wsGeneration` anti-course et reconnexion automatique exponentielle sur reprise réseau (`visibilitychange` / `online` avec `last_seq`).
 
 ---
 

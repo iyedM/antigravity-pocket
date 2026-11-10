@@ -1,6 +1,7 @@
 import asyncio
 import re
 import shlex
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -137,10 +138,13 @@ class ApprovalRequest:
 
 
 class ApprovalManager:
-    """Manages pending mobile approval cards and policy checks per session."""
+    """Thread-safe, atomic approval state machine bounded against memory exhaustion."""
+
+    MAX_TRACKED_APPROVALS = 1024
 
     def __init__(self) -> None:
         self._pending: dict[str, ApprovalRequest] = {}
+        self._lock = threading.Lock()
 
     def create_request(
         self,
@@ -158,7 +162,19 @@ class ApprovalManager:
             workspace=workspace,
             risk_description=risk_description,
         )
-        self._pending[req.approval_id] = req
+        with self._lock:
+            if len(self._pending) >= self.MAX_TRACKED_APPROVALS:
+                # Evict oldest already-resolved entry first, else oldest entry
+                resolved_keys = [
+                    k for k, v in self._pending.items() if v.status != "pending"
+                ]
+                victim = (
+                    resolved_keys[0]
+                    if resolved_keys
+                    else next(iter(self._pending))
+                )
+                self._pending.pop(victim, None)
+            self._pending[req.approval_id] = req
         return req
 
     def resolve(
@@ -167,37 +183,42 @@ class ApprovalManager:
         approved: bool,
         expected_session_id: str | None = None,
     ) -> ApprovalRequest | None:
-        req = self._pending.get(approval_id)
-        if not req:
-            return None
-        if expected_session_id is not None and req.session_id != expected_session_id:
-            raise PermissionError(
-                f"Accès refusé : l'approbation {approval_id} appartient à une autre session."
-            )
-        if req.status != "pending":
-            return None
-        req.status = "approved" if approved else "rejected"
-        req.resolved_at = datetime.now(UTC).isoformat()
-        req._event.set()
-        return req
+        with self._lock:
+            req = self._pending.get(approval_id)
+            if not req:
+                return None
+            if expected_session_id is not None and req.session_id != expected_session_id:
+                raise PermissionError(
+                    f"Accès refusé : l'approbation {approval_id} appartient à une autre session."
+                )
+            if req.status != "pending":
+                return None
+            req.status = "approved" if approved else "rejected"
+            req.resolved_at = datetime.now(UTC).isoformat()
+            req._event.set()
+            return req
 
     async def wait_for_decision(self, approval_id: str, timeout: float = 300.0) -> bool:
-        req = self._pending.get(approval_id)
+        with self._lock:
+            req = self._pending.get(approval_id)
         if not req:
             return False
         try:
             await asyncio.wait_for(req._event.wait(), timeout=timeout)
-            return req.status == "approved"
         except TimeoutError:
-            req.status = "rejected"
-            req.resolved_at = datetime.now(UTC).isoformat()
-            return False
+            pass
+        with self._lock:
+            if req.status == "pending":
+                req.status = "rejected"
+                req.resolved_at = datetime.now(UTC).isoformat()
+            return req.status == "approved"
 
     def list_for_session(self, session_id: str | None = None) -> list[dict]:
-        items = list(self._pending.values())
-        if session_id:
-            items = [r for r in items if r.session_id == session_id]
-        return [r.to_dict() for r in items]
+        with self._lock:
+            items = list(self._pending.values())
+            if session_id:
+                items = [r for r in items if r.session_id == session_id]
+            return [r.to_dict() for r in items]
 
 
 approval_manager = ApprovalManager()

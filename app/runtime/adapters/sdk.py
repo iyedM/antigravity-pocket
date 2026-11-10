@@ -24,9 +24,18 @@ class SDKAdapter(AgentAdapter):
       which unwinds the `async with Agent(config)` context manager immediately.
     """
 
-    def __init__(self, sdk_factory: Callable[[Any], Any] | None = None) -> None:
+    def __init__(
+        self,
+        sdk_factory: Callable[[Any], Any] | None = None,
+        require_sandbox_status: bool | None = None,
+    ) -> None:
         self._active_sdk_tasks: dict[str, asyncio.Task] = {}
         self._sdk_factory = sdk_factory
+        self._require_sandbox_status = (
+            (sdk_factory is None)
+            if require_sandbox_status is None
+            else require_sandbox_status
+        )
 
     @staticmethod
     def build_real_sdk_config(
@@ -285,6 +294,43 @@ class SDKAdapter(AgentAdapter):
                 agent_cm = Agent(config)
 
             async with agent_cm as agent:
+                if permission_mode != PermissionMode.READ_ONLY:
+                    sb_status = getattr(agent, "sandbox_status", None)
+                    if sb_status is not None and not getattr(
+                        sb_status, "available", True
+                    ):
+                        reason = (
+                            getattr(sb_status, "unavailable_reason", None)
+                            or "Sandbox OS (exebox) inactif sur cet hôte."
+                        )
+                        await emit(
+                            EventType.SESSION_ERROR,
+                            {
+                                "error": (
+                                    f"Exécution refusée (fail-closed) : isolation OS indisponible ({reason})."
+                                )
+                            },
+                        )
+                        return
+                    if (
+                        self._require_sandbox_status
+                        and permission_mode == PermissionMode.AUTONOMOUS
+                        and (
+                            sb_status is None
+                            or not getattr(sb_status, "available", False)
+                        )
+                    ):
+                        await emit(
+                            EventType.SESSION_ERROR,
+                            {
+                                "error": (
+                                    "Mode autonome refusé (fail-closed) : le moteur n'a pas confirmé "
+                                    "l'activation effective du sandbox OS (sandbox_status)."
+                                )
+                            },
+                        )
+                        return
+
                 response = await agent.chat(message)
 
                 async def _stream_tools() -> None:

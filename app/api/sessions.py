@@ -120,11 +120,16 @@ async def resolve_approval(
     payload: ResolveApprovalRequest,
     _: None = Depends(require_auth),
 ) -> dict:
+    if not payload.session_id or not payload.session_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Le champ session_id est obligatoire pour vérifier l'appartenance de l'approbation.",
+        )
     try:
         req = approval_manager.resolve(
             approval_id,
             approved=payload.approved,
-            expected_session_id=payload.session_id,
+            expected_session_id=payload.session_id.strip(),
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))

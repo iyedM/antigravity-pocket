@@ -1,8 +1,9 @@
 from collections.abc import AsyncIterator
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
 from app.core.security import require_auth, require_download_auth
 from app.services.workspace_service import (
@@ -89,12 +90,21 @@ async def download_workspace_file(
     filepath: str,
     request: Request,
     _: None = Depends(require_download_auth),
-) -> FileResponse:
+) -> StreamingResponse:
     ws = _get_ws_service(request)
     try:
-        target = ws.resolve_safe_path(filepath)
+        stream, filename, media_type, size = ws.open_download_stream(filepath)
     except WorkspaceSecurityError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="Fichier introuvable.")
-    return FileResponse(path=target, filename=target.name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    safe_disp = quote(filename)
+    return StreamingResponse(
+        stream,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{safe_disp}",
+            "Content-Length": str(size),
+        },
+    )

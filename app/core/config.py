@@ -35,7 +35,31 @@ def _load_or_create_secret_key() -> str:
     env_key = os.environ.get("APP_SECRET_KEY", "").strip()
     if is_strong_secret_value(env_key, min_len=32):
         return env_key
-    return _PROCESS_SECRET_KEY
+
+    db_env = os.environ.get("AGY_DB_PATH", "").strip()
+    key_dir = (
+        Path(db_env).resolve().parent
+        if db_env
+        else (Path.home() / ".gemini" / "antigravity-pocket")
+    )
+    key_file = key_dir / "secret.key"
+    try:
+        key_dir.mkdir(parents=True, exist_ok=True)
+        if key_file.is_file() and not key_file.is_symlink():
+            stored = key_file.read_text(encoding="utf-8").strip()
+            if is_strong_secret_value(stored, min_len=32):
+                return stored
+        generated = secrets.token_hex(32)
+        fd = os.open(
+            str(key_file),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(generated)
+        return generated
+    except OSError:
+        return _PROCESS_SECRET_KEY
 
 
 @dataclass
@@ -43,7 +67,7 @@ class Settings:
     """Centralized application settings with mandatory fail-closed authentication."""
 
     app_name: str = "Antigravity Pocket"
-    version: str = "2.2.0"
+    version: str = "2.3.0-rc1"
     app_password: str = field(
         default_factory=lambda: os.environ.get("APP_PASSWORD", "").strip()
     )

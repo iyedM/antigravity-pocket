@@ -398,18 +398,73 @@
       await connectWebSocket();
     }
 
+    let wsGeneration = 0;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
+
     async function connectWebSocket() {
-      if (!currentSessionId) return;
-      if (ws) { try { ws.close(); } catch (e) {} }
+      if (!currentSessionId || !authToken) return;
+      const myGen = ++wsGeneration;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        try { ws.close(); } catch (e) {}
+        ws = null;
+      }
+      const targetSid = currentSessionId;
       const ticket = await requestEphemeralTicket("ws");
-      if (!ticket) return;
-      const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(currentSessionId)}?ticket=${encodeURIComponent(ticket)}&last_seq=${lastSequence}`);
+      if (myGen !== wsGeneration || currentSessionId !== targetSid) return;
       const dot = document.getElementById("ws-dot");
-      ws.onopen = () => dot.classList.remove("offline");
-      ws.onclose = () => dot.classList.add("offline");
-      ws.onmessage = (ev) => renderTimelineEvent(JSON.parse(ev.data));
+      if (!ticket) {
+        dot.classList.add("offline");
+        scheduleReconnect(myGen);
+        return;
+      }
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(targetSid)}?ticket=${encodeURIComponent(ticket)}&last_seq=${lastSequence}`);
+      ws = socket;
+      socket.onopen = () => {
+        if (myGen !== wsGeneration) return;
+        reconnectAttempt = 0;
+        dot.classList.remove("offline");
+      };
+      socket.onclose = () => {
+        if (myGen !== wsGeneration) return;
+        dot.classList.add("offline");
+        scheduleReconnect(myGen);
+      };
+      socket.onmessage = (ev) => {
+        if (myGen !== wsGeneration) return;
+        try {
+          renderTimelineEvent(JSON.parse(ev.data));
+        } catch (err) {}
+      };
     }
+
+    function scheduleReconnect(expectedGen) {
+      if (expectedGen !== wsGeneration || !authToken || !currentSessionId) return;
+      const delay = Math.min(1500 * Math.pow(2, reconnectAttempt), 15000);
+      reconnectAttempt += 1;
+      reconnectTimer = setTimeout(() => {
+        if (expectedGen === wsGeneration) connectWebSocket();
+      }, delay);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && authToken && currentSessionId) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
+      }
+    });
+    window.addEventListener("online", () => {
+      if (authToken && currentSessionId && (!ws || ws.readyState !== WebSocket.OPEN)) {
+        connectWebSocket();
+      }
+    });
 
     function ensureAgentTurnContainer() {
       if (!activeTurnBubble) {
@@ -444,6 +499,11 @@
         turn.timeline.appendChild(
           el("div", "timeline-item", `⚙️ Outil : ${p.tool || "tool"} (${p.status || "running"})`)
         );
+      } else if (ev.type === "tool_completed") {
+        const turn = ensureAgentTurnContainer();
+        turn.timeline.appendChild(
+          el("div", "timeline-item", `✅ Outil terminé : ${p.tool || "tool"} (${p.status || "completed"})`)
+        );
       } else if (ev.type === "approval_required") {
         haptic(80);
         const turn = ensureAgentTurnContainer();
@@ -459,10 +519,17 @@
         btnRow.style.marginTop = "8px";
 
         const approveBtn = el("button", "btn success", "✅ Approuver");
-        approveBtn.addEventListener("click", () => resolveApproval(p.approval_id, true, p.session_id));
-
         const rejectBtn = el("button", "btn danger", "❌ Refuser");
-        rejectBtn.addEventListener("click", () => resolveApproval(p.approval_id, false, p.session_id));
+        approveBtn.addEventListener("click", () => {
+          approveBtn.disabled = true;
+          rejectBtn.disabled = true;
+          resolveApproval(p.approval_id, true, p.session_id);
+        });
+        rejectBtn.addEventListener("click", () => {
+          approveBtn.disabled = true;
+          rejectBtn.disabled = true;
+          resolveApproval(p.approval_id, false, p.session_id);
+        });
 
         btnRow.appendChild(approveBtn);
         btnRow.appendChild(rejectBtn);

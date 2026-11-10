@@ -1,7 +1,9 @@
+import errno
 import mimetypes
 import os
+import stat as stat_mod
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -245,24 +247,97 @@ class WorkspaceService:
             "size": written,
         }
 
-    def preview_file(self, relative_path: str, max_bytes: int = 65536) -> dict[str, Any]:
-        target = self.resolve_safe_path(relative_path)
-        if not target.is_file():
-            raise FileNotFoundError("Fichier introuvable.")
+    def _open_safe_file_fd(
+        self, relative_path: str
+    ) -> tuple[int, str, str, os.stat_result]:
+        """
+        Atomically opens a regular file inside `self.root` by walking directory
+        file descriptors (`dir_fd` + `O_DIRECTORY | O_NOFOLLOW`) component by component,
+        eliminating any TOCTOU symlink-swap window on intermediate directories or the target file.
+        """
+        clean_rel = relative_path.strip().lstrip("/")
+        if not clean_rel:
+            raise FileNotFoundError("Chemin de fichier vide.")
+        parts = Path(clean_rel).parts
+        for part in parts:
+            if part in ("", ".", ".."):
+                raise WorkspaceSecurityError(
+                    "Navigation '..' interdite dans le workspace."
+                )
 
-        # Open with O_NOFOLLOW to prevent TOCTOU symlink swap between resolve and read
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(target), flags)
+        o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+        o_directory = getattr(os, "O_DIRECTORY", 0)
+        dir_fd = os.open(str(self.root), os.O_RDONLY | o_directory | o_nofollow)
         try:
-            stat = os.fstat(fd)
-            size = stat.st_size
-            ext = target.suffix.lower()
-            mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            for comp in parts[:-1]:
+                try:
+                    next_fd = os.open(
+                        comp,
+                        os.O_RDONLY | o_directory | o_nofollow,
+                        dir_fd=dir_fd,
+                    )
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.EACCES):
+                        raise WorkspaceSecurityError(
+                            "Les liens symboliques (symlinks) sont interdits."
+                        ) from exc
+                    if exc.errno == errno.ENOENT:
+                        raise FileNotFoundError("Dossier introuvable.") from exc
+                    raise
+                os.close(dir_fd)
+                dir_fd = next_fd
+
+            leaf = parts[-1]
+            try:
+                file_fd = os.open(leaf, os.O_RDONLY | o_nofollow, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.EACCES):
+                    raise WorkspaceSecurityError(
+                        "Les liens symboliques (symlinks) sont interdits."
+                    ) from exc
+                if exc.errno in (errno.ENOENT, errno.EISDIR):
+                    raise FileNotFoundError("Fichier introuvable.") from exc
+                raise
+
+            st = os.fstat(file_fd)
+            if not stat_mod.S_ISREG(st.st_mode):
+                os.close(file_fd)
+                raise FileNotFoundError("La cible n'est pas un fichier régulier.")
+
+            return file_fd, leaf, "/".join(parts), st
+        finally:
+            os.close(dir_fd)
+
+    def open_download_stream(
+        self, relative_path: str, chunk_size: int = 65536
+    ) -> tuple[Iterator[bytes], str, str, int]:
+        """Returns `(byte_iterator, filename, media_type, file_size)` backed by an already-opened safe `fd`."""
+        file_fd, leaf_name, _norm_rel, st = self._open_safe_file_fd(relative_path)
+        mime = mimetypes.guess_type(leaf_name)[0] or "application/octet-stream"
+
+        def _stream() -> Iterator[bytes]:
+            try:
+                while True:
+                    chunk = os.read(file_fd, chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                os.close(file_fd)
+
+        return _stream(), leaf_name, mime, st.st_size
+
+    def preview_file(self, relative_path: str, max_bytes: int = 65536) -> dict[str, Any]:
+        fd, leaf_name, norm_rel, st = self._open_safe_file_fd(relative_path)
+        try:
+            size = st.st_size
+            ext = Path(leaf_name).suffix.lower()
+            mime = mimetypes.guess_type(leaf_name)[0] or "application/octet-stream"
 
             if ext not in PREVIEWABLE_EXTENSIONS and not mime.startswith("text/"):
                 return {
-                    "name": target.name,
-                    "path": str(target.relative_to(self.root)),
+                    "name": leaf_name,
+                    "path": norm_rel,
                     "size": size,
                     "mime": mime,
                     "previewable": False,
@@ -276,8 +351,8 @@ class WorkspaceService:
 
         text = raw.decode("utf-8", errors="replace")
         return {
-            "name": target.name,
-            "path": str(target.relative_to(self.root)),
+            "name": leaf_name,
+            "path": norm_rel,
             "size": size,
             "mime": mime,
             "previewable": True,

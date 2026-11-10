@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
+import re
+import shutil
 import sqlite3
+import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -937,5 +942,251 @@ def test_multi_client_ws_repeated_disconnects_and_concurrent_bursts(
 
     assert client_stay_seqs == list(range(1, 121))
     assert client_roam_seqs == list(range(1, 121))
+
+
+def test_concurrent_approval_resolution_atomicity(tmp_path: Path) -> None:
+    """
+    Prove that 20 simultaneous threads racing on ApprovalManager.resolve()
+    produce strictly 1 winner and 19 None returns, and missing session_id on REST returns 400.
+    """
+    local_mgr = ApprovalManager()
+    req = local_mgr.create_request(
+        session_id="sess-atomic",
+        tool_name="run_command",
+        command_or_target="pytest",
+        workspace=str(tmp_path),
+        risk_description="Concurrent race test",
+    )
+
+    barrier = threading.Barrier(20)
+
+    def _contender(idx: int):
+        barrier.wait(timeout=5.0)
+        return local_mgr.resolve(
+            req.approval_id,
+            approved=(idx % 2 == 0),
+            expected_session_id="sess-atomic",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(_contender, range(20)))
+
+    winners = [r for r in results if r is not None]
+    losers = [r for r in results if r is None]
+    assert len(winners) == 1
+    assert len(losers) == 19
+    assert req.status in ("approved", "rejected")
+
+    # Also verify REST /api/v1/approvals/{id}/resolve rejects missing session_id (HTTP 400)
+    client, token = _setup_audit_env(tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+    res_missing_sid = client.post(
+        f"/api/v1/approvals/{req.approval_id}/resolve",
+        json={"approved": True},
+        headers=headers,
+    )
+    assert res_missing_sid.status_code == 400
+
+
+def test_sdk_fail_closed_when_os_sandbox_unavailable(tmp_path: Path) -> None:
+    """
+    Verify SDKAdapter aborts BEFORE calling agent.chat() when Agent.sandbox_status
+    reports available=False or is unconfirmed (None) in AUTONOMOUS mode.
+    """
+    from google.antigravity import types
+
+    async def _run() -> None:
+        chat_invocations = 0
+        current_sandbox_status: types.SandboxStatus | None = types.SandboxStatus(
+            available=False,
+            unavailable_reason="Kernel user namespaces disabled on host",
+        )
+
+        class _SandboxReportingAgent:
+            def __init__(self, _cfg: dict[str, Any]) -> None:
+                self.sandbox_status = current_sandbox_status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(
+                self, exc_type: object, exc: object, tb: object
+            ) -> None:
+                return None
+
+            async def chat(self, _prompt: str) -> Any:
+                nonlocal chat_invocations
+                chat_invocations += 1
+
+                class _Stream:
+                    def __aiter__(self_s):
+                        async def _gen():
+                            yield "sandboxed-ok"
+
+                        return _gen()
+
+                return _Stream()
+
+        session_service = SessionService(db_path=tmp_path / "sb_check.db")
+        adapter = SDKAdapter(
+            sdk_factory=_SandboxReportingAgent, require_sandbox_status=True
+        )
+        manager = AgentRuntimeManager(
+            session_service=session_service, adapter=adapter
+        )
+
+        # 1. available=False in AUTONOMOUS -> must fail closed BEFORE agent.chat()
+        s1 = session_service.create_session(
+            title="UnsandboxedAuto",
+            workspace=str(tmp_path),
+            permission_mode=PermissionMode.AUTONOMOUS.value,
+        )
+        await manager.run_turn(s1["session_id"], "Run task")
+        assert chat_invocations == 0
+        st1 = session_service.get_session(s1["session_id"])
+        assert st1 is not None and st1["status"] == "error"
+
+        # 2. sandbox_status=None in AUTONOMOUS -> must also fail closed BEFORE agent.chat()
+        current_sandbox_status = None
+        s2 = session_service.create_session(
+            title="UnconfirmedSandboxAuto",
+            workspace=str(tmp_path),
+            permission_mode=PermissionMode.AUTONOMOUS.value,
+        )
+        await manager.run_turn(s2["session_id"], "Run task")
+        assert chat_invocations == 0
+        st2 = session_service.get_session(s2["session_id"])
+        assert st2 is not None and st2["status"] == "error"
+
+        # 3. available=True -> agent.chat() executes and session completes!
+        current_sandbox_status = types.SandboxStatus(available=True)
+        s3 = session_service.create_session(
+            title="VerifiedSandboxAuto",
+            workspace=str(tmp_path),
+            permission_mode=PermissionMode.AUTONOMOUS.value,
+        )
+        await manager.run_turn(s3["session_id"], "Run task")
+        assert chat_invocations == 1
+        st3 = session_service.get_session(s3["session_id"])
+        assert st3 is not None and st3["status"] == "completed"
+
+    asyncio.run(_run())
+
+
+def test_toctou_mid_operation_symlink_swap_on_preview_and_download(
+    tmp_path: Path,
+) -> None:
+    """
+    Verify kernel dir_fd + O_DIRECTORY | O_NOFOLLOW traversal blocks both leaf symlink swaps
+    and intermediate-directory symlink swaps on /preview and /download.
+    """
+    client, token = _setup_audit_env(tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+    ws_root = tmp_path / "workspace"
+    outside_secret = tmp_path / "outside_host.txt"
+    outside_secret.write_text("TOP_SECRET_HOST_DATA", encoding="utf-8")
+
+    subdir = ws_root / "reports"
+    subdir.mkdir(parents=True, exist_ok=True)
+    legit_file = subdir / "summary.txt"
+    legit_file.write_text("legit-report", encoding="utf-8")
+
+    # 1. Legitimate preview & download succeed
+    res_prev_ok = client.get(
+        "/api/v1/files/preview?path=reports/summary.txt", headers=headers
+    )
+    assert res_prev_ok.status_code == 200
+    assert res_prev_ok.json()["content"] == "legit-report"
+
+    tkt_ok = client.post(
+        "/api/v1/auth/ticket", json={"purpose": "download"}, headers=headers
+    ).json()["ticket"]
+    res_dl_ok = client.get(
+        f"/api/v1/files/download/reports/summary.txt?ticket={tkt_ok}"
+    )
+    assert res_dl_ok.status_code == 200
+    assert res_dl_ok.text == "legit-report"
+
+    # 2. Swap leaf file into a symlink pointing outside workspace -> blocked (403)
+    legit_file.unlink()
+    legit_file.symlink_to(outside_secret)
+
+    assert (
+        client.get(
+            "/api/v1/files/preview?path=reports/summary.txt", headers=headers
+        ).status_code
+        == 403
+    )
+    tkt_leaf = client.post(
+        "/api/v1/auth/ticket", json={"purpose": "download"}, headers=headers
+    ).json()["ticket"]
+    assert (
+        client.get(
+            f"/api/v1/files/download/reports/summary.txt?ticket={tkt_leaf}"
+        ).status_code
+        == 403
+    )
+
+    # 3. Swap intermediate directory (`reports`) into a symlink pointing to tmp_path -> blocked (403)
+    legit_file.unlink()
+    subdir.rmdir()
+    subdir.symlink_to(tmp_path)
+
+    assert (
+        client.get(
+            "/api/v1/files/preview?path=reports/outside_host.txt", headers=headers
+        ).status_code
+        == 403
+    )
+    tkt_dir = client.post(
+        "/api/v1/auth/ticket", json={"purpose": "download"}, headers=headers
+    ).json()["ticket"]
+    assert (
+        client.get(
+            f"/api/v1/files/download/reports/outside_host.txt?ticket={tkt_dir}"
+        ).status_code
+        == 403
+    )
+
+
+def test_mobile_frontend_javascript_syntax_and_reconnect_invariants(
+    tmp_path: Path,
+) -> None:
+    """Validate index.html contains no XSS sinks, preserves wsGeneration/last_seq reconnect, and parses cleanly."""
+    index_path = (
+        Path(__file__).resolve().parent.parent / "app" / "static" / "index.html"
+    )
+    html = index_path.read_text(encoding="utf-8")
+
+    # Security & anti-XSS invariants
+    assert ".innerHTML" not in html
+    assert ".outerHTML" not in html
+    assert "document.write(" not in html
+    assert "eval(" not in html
+    assert "?token=" not in html
+
+    # Streaming, session-ownership & mobile reconnection invariants
+    assert "wsGeneration" in html
+    assert "visibilitychange" in html
+    assert "last_seq=" in html
+    assert "session_id: targetSession" in html
+    assert 'ev.type === "tool_completed"' in html
+
+    # Parse inline JS with Node.js `node --check` if available on host
+    match = re.search(r"<script>(.*?)</script>", html, flags=re.DOTALL)
+    assert match is not None
+    js_file = tmp_path / "extracted_app.js"
+    js_file.write_text(match.group(1), encoding="utf-8")
+
+    node_bin = shutil.which("node")
+    if node_bin:
+        proc = subprocess.run(
+            [node_bin, "--check", str(js_file)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, f"JS syntax error: {proc.stderr}"
+
 
 
